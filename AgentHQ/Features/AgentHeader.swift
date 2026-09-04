@@ -3,6 +3,7 @@ import SwiftUI
 
 struct AgentHeader: View {
     @Bindable var agent: Agent
+    @EnvironmentObject private var session: AppSession
     @Environment(\.modelContext) private var modelContext
     @State private var showingMascotPicker = false
     @State private var saveError: String?
@@ -12,7 +13,7 @@ struct AgentHeader: View {
             Button {
                 showingMascotPicker.toggle()
             } label: {
-                MascotView(kind: agent.mascot, state: .idle, size: 40)
+                MascotView(kind: agent.mascot, state: session.mascotState(for: agent.id), size: 40)
             }
             .buttonStyle(.plain)
             .help("Change mascot")
@@ -42,8 +43,10 @@ struct AgentHeader: View {
 
                 Button {
                     if let path = WorkspaceFolder.choose(currentPath: agent.workspacePath) {
-                        agent.workspacePath = path
-                        persist()
+                        Task {
+                            await session.changeWorkspace(for: agent, to: path)
+                            persist()
+                        }
                     }
                 } label: {
                     Text(agent.displayWorkspacePath)

@@ -84,12 +84,24 @@ enum CodexErrorClassifier {
     }
 }
 
+struct PendingApproval: Equatable {
+    let requestId: JSONRPCID
+    let threadId: String
+    let agentID: UUID?
+    let command: String
+    let reason: String?
+}
+
 @MainActor
 final class AppSession: ObservableObject {
     @Published private(set) var connectionState: CodexConnectionState = .idle
     @Published private(set) var models: [ModelInfo] = []
     @Published private(set) var resolvedExecutablePath: String?
     @Published var banner: String?
+    @Published private(set) var items: [ChatItem] = []
+    @Published private(set) var activeTurnAgentIDs: Set<UUID> = []
+    @Published private(set) var workspaceWarning: String?
+    @Published private(set) var pendingApproval: PendingApproval?
 
     static let clientInfo = ClientInfo(name: "agent_hq", title: "Agent HQ", version: "0.1.0")
 
@@ -102,6 +114,16 @@ final class AppSession: ObservableObject {
     private var didForceRetry = false
     private let resolveExecutable: () -> URL?
     private let makeClient: (URL) -> AppServerClient
+    private var eventPump: Task<Void, Never>?
+    private var eventContinuations: [UUID: AsyncStream<ServerEvent>.Continuation] = [:]
+    private var itemsByAgent: [UUID: [ChatItem]] = [:]
+    private var agentIDByThread: [String: UUID] = [:]
+    private var hydratedAgents: Set<UUID> = []
+    private var selectedAgentID: UUID?
+    private var selectGeneration = 0
+    private var startingTurnAgentIDs: Set<UUID> = []
+    private var pendingInterruptAgentIDs: Set<UUID> = []
+    private var interruptedAgentIDs: Set<UUID> = []
 
     var showsSetupEmptyState: Bool {
         switch connectionState {
@@ -116,6 +138,28 @@ final class AppSession: ObservableObject {
 
     var isReconnecting: Bool {
         connectionState == .connecting && didConnectOnce
+    }
+
+    func isTurnActive(for agentID: UUID) -> Bool {
+        activeTurnAgentIDs.contains(agentID)
+    }
+
+    func mascotState(for agentID: UUID) -> MascotState {
+        if pendingApproval?.agentID == agentID { return .needsApproval }
+        if activeTurnAgentIDs.contains(agentID) { return .working }
+        return .idle
+    }
+
+    func subscribeToEvents() -> AsyncStream<ServerEvent> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<ServerEvent>.makeStream()
+        eventContinuations[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { @MainActor in
+                self?.eventContinuations.removeValue(forKey: id)
+            }
+        }
+        return stream
     }
 
     init(
@@ -147,6 +191,114 @@ final class AppSession: ObservableObject {
         reconnectUsed = false
         banner = nil
         await connect(generation: generation, allowReconnect: true)
+    }
+
+    func shutdown() {
+        discardClient()
+    }
+
+    func ensureThread(for agent: Agent) async {
+        selectGeneration += 1
+        let generation = selectGeneration
+        selectedAgentID = agent.id
+        items = itemsByAgent[agent.id] ?? []
+
+        guard connectionState == .ready, client != nil else { return }
+
+        if !workspaceExists(agent.workspacePath) {
+            workspaceWarning = "Workspace folder is missing"
+            return
+        }
+        if workspaceWarning == "Workspace folder is missing" {
+            workspaceWarning = nil
+        }
+
+        if hydratedAgents.contains(agent.id), agent.threadId != nil {
+            return
+        }
+
+        if let threadId = agent.threadId {
+            await resumeThread(for: agent, threadId: threadId, generation: generation)
+        } else {
+            await startThread(for: agent, generation: generation)
+        }
+    }
+
+    func send(_ text: String, from agent: Agent) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let threadId = agent.threadId, let client, !trimmed.isEmpty else { return }
+        guard !activeTurnAgentIDs.contains(agent.id) else { return }
+
+        interruptedAgentIDs.remove(agent.id)
+        pendingInterruptAgentIDs.remove(agent.id)
+
+        var current = itemsByAgent[agent.id] ?? []
+        current.append(ChatItem(id: "local-\(UUID().uuidString)", kind: .user(trimmed)))
+        ChatTranscript.setWorking(detail: nil, on: &current)
+        store(current, for: agent.id)
+        activeTurnAgentIDs.insert(agent.id)
+        startingTurnAgentIDs.insert(agent.id)
+
+        do {
+            _ = try await client.turnStart(
+                TurnStartParams(
+                    threadId: threadId,
+                    input: [.text(trimmed)],
+                    model: agent.model.isEmpty ? nil : agent.model,
+                    effort: agent.reasoningEffort.isEmpty ? nil : agent.reasoningEffort
+                )
+            )
+            startingTurnAgentIDs.remove(agent.id)
+            if pendingInterruptAgentIDs.contains(agent.id) {
+                pendingInterruptAgentIDs.remove(agent.id)
+                await performInterrupt(for: agent, threadId: threadId)
+            }
+        } catch {
+            startingTurnAgentIDs.remove(agent.id)
+            pendingInterruptAgentIDs.remove(agent.id)
+            finishTurn(agent.id)
+            banner = error.localizedDescription
+        }
+    }
+
+    func interruptTurn(for agent: Agent) async {
+        guard let threadId = agent.threadId else { return }
+        if startingTurnAgentIDs.contains(agent.id) {
+            pendingInterruptAgentIDs.insert(agent.id)
+            return
+        }
+        guard activeTurnAgentIDs.contains(agent.id) else { return }
+        await performInterrupt(for: agent, threadId: threadId)
+    }
+
+    func changeWorkspace(for agent: Agent, to path: String) async {
+        let oldThreadId = agent.threadId
+        if activeTurnAgentIDs.contains(agent.id) {
+            await interruptTurn(for: agent)
+        }
+        if let oldThreadId {
+            try? await client?.threadArchive(threadId: oldThreadId)
+            agentIDByThread.removeValue(forKey: oldThreadId)
+        }
+        agent.workspacePath = path
+        agent.threadId = nil
+        itemsByAgent[agent.id] = []
+        hydratedAgents.remove(agent.id)
+        finishTurn(agent.id)
+        if selectedAgentID == agent.id {
+            items = []
+        }
+        await ensureThread(for: agent)
+    }
+
+    func respondToPendingApproval(_ decision: ApprovalDecision) async {
+        guard let pending = pendingApproval else { return }
+        pendingApproval = nil
+        do {
+            try await client?.respondApproval(requestId: pending.requestId, decision: decision)
+        } catch {
+            banner = error.localizedDescription
+        }
     }
 
     private func connect(generation: Int, allowReconnect: Bool) async {
@@ -191,7 +343,9 @@ final class AppSession: ObservableObject {
             connectionState = .ready
             didConnectOnce = true
             banner = nil
+            hydratedAgents.removeAll()
             observeTermination(of: client, generation: generation, allowReconnect: allowReconnect)
+            pumpEvents(from: client)
             writeEvidence()
             maybeForceRetryForEvidence()
         } catch {
@@ -204,11 +358,19 @@ final class AppSession: ObservableObject {
     }
 
     private func discardClient() {
+        eventPump?.cancel()
+        eventPump = nil
         let old = client
         lastStoppedPid = old?.processIdentifier
         client = nil
         old?.onTermination = nil
         old?.stop()
+        activeTurnAgentIDs = []
+        startingTurnAgentIDs = []
+        pendingInterruptAgentIDs = []
+        interruptedAgentIDs = []
+        pendingApproval = nil
+        clearWorkingRows()
     }
 
     private func observeTermination(
@@ -283,6 +445,183 @@ final class AppSession: ObservableObject {
         Task { await retry() }
     }
 
+    private func pumpEvents(from client: AppServerClient) {
+        eventPump?.cancel()
+        eventPump = Task.detached { [weak self, weak client] in
+            guard let client else { return }
+            for await event in client.events {
+                guard !Task.isCancelled else { break }
+                await self?.handleEvent(event)
+            }
+        }
+    }
+
+    private func handleEvent(_ event: ServerEvent) {
+        broadcast(event)
+
+        switch event {
+        case .commandExecutionApproval(let requestId, let params):
+            pendingApproval = PendingApproval(
+                requestId: requestId,
+                threadId: params.threadId,
+                agentID: agentIDByThread[params.threadId],
+                command: params.command ?? "command",
+                reason: params.reason
+            )
+        case .request(let requestId, let method, let params):
+            if method.contains("requestApproval") || method.contains("requestUserInput") {
+                let threadId = params?.object?["threadId"]?.string ?? ""
+                pendingApproval = PendingApproval(
+                    requestId: requestId,
+                    threadId: threadId,
+                    agentID: agentIDByThread[threadId],
+                    command: params?.object?["command"]?.string
+                        ?? params?.object?["reason"]?.string
+                        ?? method,
+                    reason: params?.object?["reason"]?.string
+                )
+            }
+        default:
+            break
+        }
+
+        guard let threadId = eventThreadId(event), let agentID = agentIDByThread[threadId] else { return }
+        if interruptedAgentIDs.contains(agentID) {
+            guard case .turnCompleted = event else { return }
+        }
+        var current = itemsByAgent[agentID] ?? []
+        let finished = ChatTranscript.apply(event, threadId: threadId, to: &current)
+        store(current, for: agentID)
+        if finished {
+            finishTurn(agentID)
+            interruptedAgentIDs.remove(agentID)
+            if pendingApproval?.threadId == threadId {
+                pendingApproval = nil
+            }
+        }
+    }
+
+    private func broadcast(_ event: ServerEvent) {
+        for continuation in eventContinuations.values {
+            continuation.yield(event)
+        }
+    }
+
+    private func eventThreadId(_ event: ServerEvent) -> String? {
+        switch event {
+        case .agentMessageDelta(let delta):
+            return delta.threadId
+        case .turnCompleted(let completed):
+            return completed.threadId
+        case .commandExecutionApproval(_, let params):
+            return params.threadId
+        case .notification(_, let params), .request(_, _, let params):
+            return params?.object?["threadId"]?.string
+        default:
+            return nil
+        }
+    }
+
+    private func startThread(for agent: Agent, generation: Int) async {
+        guard let client else { return }
+        let instructions = agent.resolvedDeveloperInstructions
+        do {
+            let thread = try await client.threadStart(
+                ThreadStartParams(
+                    cwd: agent.workspacePath,
+                    model: agent.model.isEmpty ? nil : agent.model,
+                    sandbox: .workspaceWrite,
+                    approvalPolicy: .onRequest,
+                    developerInstructions: instructions.isEmpty ? nil : instructions
+                )
+            )
+            agent.threadId = thread.id
+            agentIDByThread[thread.id] = agent.id
+            if itemsByAgent[agent.id] == nil {
+                itemsByAgent[agent.id] = []
+            }
+            hydratedAgents.insert(agent.id)
+            guard generation == selectGeneration else { return }
+            items = itemsByAgent[agent.id] ?? []
+        } catch {
+            guard generation == selectGeneration else { return }
+            banner = error.localizedDescription
+        }
+    }
+
+    private func resumeThread(for agent: Agent, threadId: String, generation: Int) async {
+        guard let client else { return }
+        do {
+            _ = try await client.threadResume(threadId: threadId)
+            agentIDByThread[threadId] = agent.id
+            if itemsByAgent[agent.id] == nil {
+                let read = try await client.threadRead(threadId: threadId, includeTurns: true)
+                itemsByAgent[agent.id] = ChatTranscript.items(from: read.thread)
+            }
+            hydratedAgents.insert(agent.id)
+            guard generation == selectGeneration else { return }
+            items = itemsByAgent[agent.id] ?? []
+        } catch {
+            agent.threadId = nil
+            hydratedAgents.remove(agent.id)
+            await startThread(for: agent, generation: generation)
+        }
+    }
+
+    private func store(_ current: [ChatItem], for agentID: UUID) {
+        itemsByAgent[agentID] = current
+        if selectedAgentID == agentID {
+            items = current
+        }
+        writeEvidence()
+    }
+
+    private func performInterrupt(for agent: Agent, threadId: String) async {
+        interruptedAgentIDs.insert(agent.id)
+        do {
+            try await client?.turnInterrupt(threadId: threadId)
+        } catch {
+            if case AppServerClientError.unknownTurn = error {
+                if startingTurnAgentIDs.contains(agent.id) {
+                    pendingInterruptAgentIDs.insert(agent.id)
+                    interruptedAgentIDs.remove(agent.id)
+                    return
+                }
+                finishTurn(agent.id)
+                return
+            }
+            interruptedAgentIDs.remove(agent.id)
+            banner = error.localizedDescription
+            return
+        }
+        finishTurn(agent.id)
+    }
+
+    private func finishTurn(_ agentID: UUID) {
+        var current = itemsByAgent[agentID] ?? []
+        ChatTranscript.removeWorking(from: &current)
+        store(current, for: agentID)
+        activeTurnAgentIDs.remove(agentID)
+        startingTurnAgentIDs.remove(agentID)
+        pendingInterruptAgentIDs.remove(agentID)
+    }
+
+    private func clearWorkingRows() {
+        for id in itemsByAgent.keys {
+            var current = itemsByAgent[id] ?? []
+            ChatTranscript.removeWorking(from: &current)
+            itemsByAgent[id] = current
+        }
+        var current = items
+        ChatTranscript.removeWorking(from: &current)
+        items = current
+    }
+
+    private func workspaceExists(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
+    }
+
     private func writeEvidence() {
         guard let raw = ProcessInfo.processInfo.environment["AGENTHQ_EVIDENCE"], !raw.isEmpty else { return }
         let dir = URL(fileURLWithPath: raw, isDirectory: true)
@@ -319,6 +658,22 @@ final class AppSession: ObservableObject {
         if let lastStoppedPid {
             payload["lastStoppedPid"] = lastStoppedPid
         }
+        payload["itemCount"] = items.count
+        payload["activeTurns"] = activeTurnAgentIDs.count
+        payload["hasWorking"] = items.contains { if case .working = $0.kind { return true }; return false }
+        if let pendingApproval {
+            payload["pendingApproval"] = pendingApproval.command
+        }
+        let transcript: [[String: String]] = items.compactMap { item in
+            switch item.kind {
+            case .user(let text): return ["kind": "user", "text": text]
+            case .assistant(let text): return ["kind": "assistant", "text": text]
+            case .working(let detail): return ["kind": "working", "text": detail ?? ""]
+            case .diff(let path, let summary): return ["kind": "diff", "text": "\(path) \(summary)"]
+            case .handoff: return ["kind": "handoff", "text": ""]
+            }
+        }
+        payload["transcript"] = transcript
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: dir.appendingPathComponent("session.json"))
         }

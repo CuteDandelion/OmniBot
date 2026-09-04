@@ -18,14 +18,23 @@ enum DebugSmoke {
 
         let workspace = evidence.appendingPathComponent("workspace")
         try? FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
+        let workspacePath = ProcessInfo.processInfo.environment["AGENTHQ_WORKSPACE"] ?? workspace.path
 
         renderSnapshots(to: evidence)
+
+        if ProcessInfo.processInfo.environment["AGENTHQ_CHAT_PROMPT"] != nil {
+            let existing = (try? modelContext.fetch(FetchDescriptor<Agent>())) ?? []
+            if let engineer = existing.first(where: { $0.role == .softwareEngineer }) {
+                selectedAgentID.wrappedValue = engineer.id
+                return
+            }
+        }
 
         let ada = Agent(
             name: "Ada",
             role: .chiefOfStaff,
             mascot: .corgi,
-            workspacePath: workspace.path,
+            workspacePath: workspacePath,
             model: "gpt-5.6",
             reasoningEffort: "medium"
         )
@@ -33,15 +42,19 @@ enum DebugSmoke {
             name: "Lin",
             role: .softwareEngineer,
             mascot: RolePreset.softwareEngineer.defaultMascot,
-            workspacePath: workspace.path
+            workspacePath: workspacePath
         )
         modelContext.insert(ada)
         modelContext.insert(lin)
         try? modelContext.save()
 
-        selectedAgentID.wrappedValue = ada.id
-        ada.mascot = .frog
-        try? modelContext.save()
+        if ProcessInfo.processInfo.environment["AGENTHQ_CHAT_PROMPT"] != nil {
+            selectedAgentID.wrappedValue = lin.id
+        } else {
+            selectedAgentID.wrappedValue = ada.id
+            ada.mascot = .frog
+            try? modelContext.save()
+        }
 
         let payload: [String: Any] = [
             "ada": [

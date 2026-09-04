@@ -56,6 +56,20 @@ final class AgentModelTests: XCTestCase {
         XCTAssertEqual(RolePreset.custom.developerInstructions, "The user blurb is the role.")
     }
 
+    func testResolvedDeveloperInstructions() throws {
+        let engineer = try makeAgent(name: "Lin", role: .softwareEngineer, mascot: .cat)
+        XCTAssertEqual(engineer.resolvedDeveloperInstructions, RolePreset.softwareEngineer.developerInstructions)
+
+        let custom = try makeAgent(
+            name: "Moth",
+            role: .custom,
+            mascot: .fox,
+            customRoleTitle: "Researcher"
+        )
+        custom.customInstructions = "  Review papers.  "
+        XCTAssertEqual(custom.resolvedDeveloperInstructions, "Review papers.")
+    }
+
     private func makeAgent(
         name: String,
         role: RolePreset,

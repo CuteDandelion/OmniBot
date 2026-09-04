@@ -143,6 +143,7 @@ final class CodexProcessTests: XCTestCase {
         XCTAssertTrue(clients[1].isRunning)
         XCTAssertTrue(waitUntilExited(pid: firstPID), "previous app-server pid \(firstPID) still alive")
         XCTAssertNotEqual(clients[1].processIdentifier, firstPID)
+        session.shutdown()
     }
 
     private func makeExecutable(_ name: String) throws -> URL {

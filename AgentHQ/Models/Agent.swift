@@ -19,6 +19,13 @@ final class Agent {
         role == .custom ? (customRoleTitle ?? "Custom") : role.defaultTitle
     }
 
+    var resolvedDeveloperInstructions: String {
+        if role == .custom {
+            return (customInstructions ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return role.developerInstructions
+    }
+
     var displayWorkspacePath: String {
         Self.displayPath(workspacePath)
     }

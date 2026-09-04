@@ -258,6 +258,7 @@ public enum ServerEvent: Sendable, Equatable {
     case commandExecutionApproval(requestId: JSONRPCID, params: CommandExecutionRequestApprovalParams)
     case notification(method: String, params: JSONValue?)
     case request(id: JSONRPCID, method: String, params: JSONValue?)
+    case invalidMessage
 }
 
 struct InitializeParams: Sendable, Codable {

@@ -6,6 +6,7 @@ public enum AppServerClientError: Error, Equatable {
     case processExited(Int32)
     case rpc(JSONRPCErrorBody)
     case unexpectedMessage
+    case unknownTurn(threadId: String)
 }
 
 /// Typed newline-delimited JSON-RPC client for `codex app-server`.
@@ -18,6 +19,8 @@ public final class AppServerClient: @unchecked Sendable {
     private var process: Process?
     private var stdin: FileHandle?
     private var readTask: Task<Void, Never>?
+    private var isStarting = false
+    private var didFinishEvents = false
     private var pending: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private var lastTurnIDByThread: [String: String] = [:]
     private let eventContinuation: AsyncStream<ServerEvent>.Continuation
@@ -48,12 +51,21 @@ public final class AppServerClient: @unchecked Sendable {
     }
 
     public func start() async throws {
-        lock.lock()
-        if process != nil {
+        while true {
+            lock.lock()
+            if process != nil {
+                lock.unlock()
+                return
+            }
+            if isStarting {
+                lock.unlock()
+                try await Task.sleep(nanoseconds: 5_000_000)
+                continue
+            }
+            isStarting = true
             lock.unlock()
-            return
+            break
         }
-        lock.unlock()
 
         let process = Process()
         process.executableURL = executableURL
@@ -71,18 +83,21 @@ public final class AppServerClient: @unchecked Sendable {
         do {
             try process.run()
         } catch {
+            lock.lock()
+            isStarting = false
+            lock.unlock()
             throw AppServerClientError.processLaunchFailed(error.localizedDescription)
         }
 
+        let stdout = stdoutPipe.fileHandleForReading
         lock.lock()
         self.process = process
         self.stdin = stdinPipe.fileHandleForWriting
-        lock.unlock()
-
-        let stdout = stdoutPipe.fileHandleForReading
-        readTask = Task { [weak self] in
+        self.readTask = Task { [weak self] in
             await self?.readLoop(handle: stdout)
         }
+        isStarting = false
+        lock.unlock()
     }
 
     public func initialize(clientInfo: ClientInfo) async throws {
@@ -114,6 +129,7 @@ public final class AppServerClient: @unchecked Sendable {
 
     public func threadStart(_ params: ThreadStartParams) async throws -> Thread {
         let envelope: ThreadEnvelope = try await send(method: AppServerMethod.threadStart, params: params)
+        rememberTurns(from: envelope.thread)
         return envelope.thread
     }
 
@@ -122,14 +138,17 @@ public final class AppServerClient: @unchecked Sendable {
             method: AppServerMethod.threadResume,
             params: ThreadIdParams(threadId: threadId)
         )
+        rememberTurns(from: envelope.thread)
         return envelope.thread
     }
 
     public func threadRead(threadId: String, includeTurns: Bool) async throws -> ThreadReadResult {
-        try await send(
+        let result: ThreadReadResult = try await send(
             method: AppServerMethod.threadRead,
             params: ThreadReadParams(threadId: threadId, includeTurns: includeTurns)
         )
+        rememberTurns(from: result.thread)
+        return result
     }
 
     public func threadArchive(threadId: String) async throws {
@@ -146,7 +165,9 @@ public final class AppServerClient: @unchecked Sendable {
     }
 
     public func turnInterrupt(threadId: String) async throws {
-        let turnId = lastTurnID(for: threadId) ?? threadId
+        guard let turnId = lastTurnID(for: threadId) else {
+            throw AppServerClientError.unknownTurn(threadId: threadId)
+        }
         let _: JSONValue = try await send(
             method: AppServerMethod.turnInterrupt,
             params: TurnInterruptParams(threadId: threadId, turnId: turnId)
@@ -184,13 +205,13 @@ public final class AppServerClient: @unchecked Sendable {
     }
 
     private func write(_ message: JSONRPCMessage) throws {
+        let data = try message.encodeLine()
         lock.lock()
-        let handle = stdin
-        lock.unlock()
-        guard let handle else {
+        defer { lock.unlock() }
+        guard let handle = stdin else {
             throw AppServerClientError.notStarted
         }
-        try handle.write(contentsOf: message.encodeLine())
+        try handle.write(contentsOf: data)
     }
 
     private func readLoop(handle: FileHandle) async {
@@ -198,14 +219,11 @@ public final class AppServerClient: @unchecked Sendable {
         do {
             for try await byte in handle.bytes {
                 if Task.isCancelled { break }
+                buffer.append(byte)
                 if byte == UInt8(ascii: "\n") {
-                    let line = buffer
-                    buffer.removeAll(keepingCapacity: true)
-                    if !line.isEmpty {
+                    for line in JSONRPCCodec.pullLines(from: &buffer) {
                         handleLine(line)
                     }
-                } else {
-                    buffer.append(byte)
                 }
             }
             if !buffer.isEmpty {
@@ -213,7 +231,11 @@ public final class AppServerClient: @unchecked Sendable {
             }
         } catch {
             failAllPending(error)
+            finishEvents()
+            return
         }
+        failAllPending(AppServerClientError.processExited(currentExitStatus()))
+        finishEvents()
     }
 
     private func handleLine(_ data: Data) {
@@ -221,6 +243,8 @@ public final class AppServerClient: @unchecked Sendable {
         do {
             message = try JSONRPCMessage.decode(data)
         } catch {
+            eventContinuation.yield(.invalidMessage)
+            failAllPending(AppServerClientError.unexpectedMessage)
             return
         }
 
@@ -268,6 +292,12 @@ public final class AppServerClient: @unchecked Sendable {
         return .request(id: request.id, method: request.method, params: request.params)
     }
 
+    private func rememberTurns(from thread: Thread) {
+        let inProgress = thread.turns.last { $0.status == "inProgress" }
+        guard let turn = inProgress ?? thread.turns.last else { return }
+        rememberTurn(threadId: thread.id, turnId: turn.id)
+    }
+
     private func rememberTurn(threadId: String, turnId: String) {
         lock.lock()
         lastTurnIDByThread[threadId] = turnId
@@ -304,7 +334,24 @@ public final class AppServerClient: @unchecked Sendable {
 
     private func handleTermination(status: Int32) {
         failAllPending(AppServerClientError.processExited(status))
-        eventContinuation.finish()
+        finishEvents()
+    }
+
+    private func currentExitStatus() -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let process else { return -1 }
+        return process.isRunning ? -1 : process.terminationStatus
+    }
+
+    private func finishEvents() {
+        lock.lock()
+        let already = didFinishEvents
+        didFinishEvents = true
+        lock.unlock()
+        if !already {
+            eventContinuation.finish()
+        }
     }
 
     func shutDown() {
@@ -315,13 +362,14 @@ public final class AppServerClient: @unchecked Sendable {
         self.process = nil
         self.stdin = nil
         self.readTask = nil
+        isStarting = false
         lock.unlock()
         readTask?.cancel()
         try? stdin?.close()
         if process?.isRunning == true {
             process?.terminate()
         }
-        eventContinuation.finish()
         failAllPending(AppServerClientError.processExited(-1))
+        finishEvents()
     }
 }

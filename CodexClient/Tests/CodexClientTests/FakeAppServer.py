@@ -140,7 +140,11 @@ def handle(msg):
         return
 
     if method == "thread/resume":
-        send({"id": mid, "result": THREAD_START_RESULT})
+        thread = dict(THREAD)
+        thread["turns"] = [{"id": "turn-resume", "items": [], "status": "inProgress"}]
+        result = dict(THREAD_START_RESULT)
+        result["thread"] = thread
+        send({"id": mid, "result": result})
         return
 
     if method == "thread/read":
@@ -159,7 +163,18 @@ def handle(msg):
         return
 
     if method == "turn/interrupt":
-        send({"id": mid, "result": {}})
+        params = msg.get("params") or {}
+        turn_id = params.get("turnId")
+        thread_id = params.get("threadId")
+        if not isinstance(turn_id, str) or not turn_id or turn_id == thread_id:
+            send(
+                {
+                    "id": mid,
+                    "error": {"code": -32602, "message": "invalid turnId"},
+                }
+            )
+            return
+        send({"id": mid, "result": {"interruptedTurnId": turn_id}})
         return
 
     if method == "model/list":

@@ -274,7 +274,7 @@ extension JSONRPCMessage: Encodable {
     }
 }
 
-/// Assigns incrementing integer ids and matches responses to in-flight requests.
+/// Allocates incrementing integer request ids; generation is serialized.
 public final class JSONRPCIDGenerator: @unchecked Sendable {
     private let lock = NSLock()
     private var next = Int64(1)

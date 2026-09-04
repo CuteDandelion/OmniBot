@@ -149,6 +149,31 @@ final class AppServerClientTests: XCTestCase {
         try await client.threadArchive(threadId: started.id)
     }
 
+    func testTurnInterruptUsesTurnIdFromResume() async throws {
+        let client = makeClient()
+        defer { client.shutDown() }
+        try await client.start()
+        try await client.initialize(clientInfo: .agentHQ)
+
+        let resumed = try await client.threadResume(threadId: "thread-1")
+        XCTAssertEqual(resumed.turns.first?.id, "turn-resume")
+        try await client.turnInterrupt(threadId: resumed.id)
+    }
+
+    func testTurnInterruptWithoutCachedTurnFails() async throws {
+        let client = makeClient()
+        defer { client.shutDown() }
+        try await client.start()
+        try await client.initialize(clientInfo: .agentHQ)
+
+        do {
+            try await client.turnInterrupt(threadId: "thread-1")
+            XCTFail("expected unknownTurn")
+        } catch AppServerClientError.unknownTurn(let threadId) {
+            XCTAssertEqual(threadId, "thread-1")
+        }
+    }
+
     private func makeClient(approval: Bool = false) -> AppServerClient {
         let script = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

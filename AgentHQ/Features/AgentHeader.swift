@@ -6,6 +6,8 @@ struct AgentHeader: View {
     @EnvironmentObject private var session: AppSession
     @Environment(\.modelContext) private var modelContext
     @State private var showingMascotPicker = false
+    @State private var showingSystemMessage = false
+    @State private var draftSystemMessage = ""
     @State private var saveError: String?
 
     var body: some View {
@@ -62,6 +64,23 @@ struct AgentHeader: View {
             }
 
             Spacer(minLength: 0)
+
+            Button {
+                draftSystemMessage = agent.resolvedDeveloperInstructions
+                showingSystemMessage.toggle()
+            } label: {
+                Image(systemName: "text.alignleft")
+                    .font(Tokens.body)
+                    .foregroundStyle(Tokens.muted)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Edit system message")
+            .accessibilityIdentifier("header-system-message")
+            .popover(isPresented: $showingSystemMessage, arrowEdge: .bottom) {
+                systemMessageEditor
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -73,6 +92,54 @@ struct AgentHeader: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(saveError ?? "")
+        }
+    }
+
+    private var systemMessageEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("System message")
+                .font(Tokens.body.weight(.semibold))
+                .foregroundStyle(Tokens.fg)
+            Text("Sent to Codex as developer instructions. Saving a change starts a new thread.")
+                .font(Tokens.caption)
+                .foregroundStyle(Tokens.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Role instructions for Codex…", text: $draftSystemMessage, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(Tokens.body)
+                .foregroundStyle(Tokens.fg)
+                .lineLimit(6...12)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Tokens.canvas)
+                .clipShape(RoundedRectangle(cornerRadius: Tokens.cardRadius))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Tokens.cardRadius)
+                        .stroke(Tokens.border, lineWidth: 1)
+                )
+                .accessibilityIdentifier("header-system-message-field")
+
+            HStack {
+                Spacer()
+                Button("Cancel") { showingSystemMessage = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { saveSystemMessage() }
+                    .keyboardShortcut(.defaultAction)
+                    .accessibilityIdentifier("header-system-message-save")
+            }
+        }
+        .padding(16)
+        .frame(width: 380)
+        .background(Tokens.subtle)
+    }
+
+    private func saveSystemMessage() {
+        let draft = draftSystemMessage
+        showingSystemMessage = false
+        Task {
+            await session.updateDeveloperInstructions(for: agent, to: draft)
+            persist()
         }
     }
 

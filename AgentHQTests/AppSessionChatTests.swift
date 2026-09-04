@@ -284,6 +284,86 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertNil(env.session.resolveHandoffSender(threadId: "missing-thread"))
         XCTAssertEqual(env.session.banner, "Handoff sender thread is unknown")
     }
+
+    func testChiefOfStaffSeedSentOnThreadStart() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        env.agent.role = .chiefOfStaff
+        env.agent.customInstructions = Agent.seededInstructions(for: .chiefOfStaff)
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        let start = try env.loggedRequest(method: "thread/start")
+        XCTAssertEqual(
+            start["developerInstructions"] as? String,
+            RolePreset.chiefOfStaff.developerInstructions
+        )
+    }
+
+    func testUserOverrideSentOnThreadStart() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        env.agent.customInstructions = "Only review PRs."
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        let start = try env.loggedRequest(method: "thread/start")
+        XCTAssertEqual(start["developerInstructions"] as? String, "Only review PRs.")
+    }
+
+    func testUpdateDeveloperInstructionsArchivesAndStartsNewThread() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        env.agent.customInstructions = RolePreset.softwareEngineer.developerInstructions
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        XCTAssertEqual(env.agent.threadId, "thread-1")
+
+        await env.session.updateDeveloperInstructions(for: env.agent, to: "Ship small diffs.")
+        XCTAssertEqual(env.agent.customInstructions, "Ship small diffs.")
+        XCTAssertEqual(env.agent.resolvedDeveloperInstructions, "Ship small diffs.")
+        XCTAssertEqual(env.agent.threadId, "thread-2")
+        XCTAssertNotNil(try env.loggedRequest(method: "thread/archive"))
+        let starts = env.loggedMethods("thread/start")
+        XCTAssertEqual(starts.count, 2)
+        XCTAssertEqual(starts.last?["developerInstructions"] as? String, "Ship small diffs.")
+    }
+
+    func testDeleteAgentArchivesThreadClearsSelectionAndRemovesHandoffs() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        env.session.selectedAgentID = env.agent.id
+
+        let other = Agent(
+            name: "Ada",
+            role: .chiefOfStaff,
+            customInstructions: RolePreset.chiefOfStaff.developerInstructions,
+            mascot: .bear,
+            workspacePath: env.workspace.path
+        )
+        env.context.insert(other)
+        let record = HandoffRecord(
+            fromAgentId: env.agent.id,
+            toAgentId: other.id,
+            brief: "do it",
+            status: "pending"
+        )
+        env.context.insert(record)
+        try env.context.save()
+
+        let deletedID = env.agent.id
+        await env.session.deleteAgent(env.agent, in: env.context)
+
+        XCTAssertNil(env.session.selectedAgentID)
+        XCTAssertNotNil(try env.loggedRequest(method: "thread/archive"))
+        let agents = try env.context.fetch(FetchDescriptor<Agent>())
+        XCTAssertEqual(agents.map(\.id), [other.id])
+        XCTAssertFalse(agents.contains { $0.id == deletedID })
+        let records = try env.context.fetch(FetchDescriptor<HandoffRecord>())
+        XCTAssertTrue(records.isEmpty)
+    }
 }
 
 private final class Collector: @unchecked Sendable {
@@ -309,7 +389,7 @@ private struct ChatFakeEnv {
     let agent: Agent
     let workspace: URL
     let logURL: URL
-    private let context: ModelContext
+    let context: ModelContext
 
     init(threadId: String? = nil, turnDelayMS: Int = 0, approvalCount: Int = 0) throws {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-ws-\(UUID().uuidString)")

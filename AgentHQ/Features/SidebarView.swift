@@ -3,9 +3,17 @@ import SwiftUI
 
 struct SidebarView: View {
     @Binding var selectedAgentID: UUID?
+    @EnvironmentObject private var session: AppSession
+    @Environment(\.modelContext) private var modelContext
     @Query(sort: \Agent.createdAt, order: .forward) private var agents: [Agent]
     @State private var filterText = ""
     @State private var showingNewAgent = false
+    @State private var pendingDeleteID: UUID?
+
+    private var pendingDeleteAgent: Agent? {
+        guard let pendingDeleteID else { return nil }
+        return agents.first { $0.id == pendingDeleteID }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,6 +35,7 @@ struct SidebarView: View {
                     .textFieldStyle(.plain)
                     .font(Tokens.body)
                     .foregroundStyle(Tokens.fg)
+                    .accessibilityIdentifier("sidebar-filter")
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 6)
@@ -43,6 +52,12 @@ struct SidebarView: View {
                 ForEach(filteredAgents, id: \.id) { agent in
                     AgentRow(agent: agent)
                         .tag(agent.id)
+                        .contextMenu {
+                            Button("Delete…", role: .destructive) {
+                                pendingDeleteID = agent.id
+                            }
+                            .accessibilityIdentifier("delete-agent-button")
+                        }
                 }
             }
             .listStyle(.sidebar)
@@ -78,6 +93,21 @@ struct SidebarView: View {
             NewAgentSheet { id in
                 selectedAgentID = id
             }
+        }
+        .alert(
+            "Delete \(pendingDeleteAgent?.name ?? "agent")?",
+            isPresented: Binding(
+                get: { pendingDeleteID != nil },
+                set: { if !$0 { pendingDeleteID = nil } }
+            ),
+            presenting: pendingDeleteAgent
+        ) { agent in
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                Task { await session.deleteAgent(agent, in: modelContext) }
+            }
+        } message: { agent in
+            Text("\(agent.name) and their handoffs will be removed. This cannot be undone.")
         }
     }
 

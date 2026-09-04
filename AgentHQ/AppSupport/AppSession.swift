@@ -370,6 +370,19 @@ final class AppSession: ObservableObject {
     }
 
     func changeWorkspace(for agent: Agent, to path: String) async {
+        agent.workspacePath = path
+        await restartThread(for: agent)
+    }
+
+    func updateDeveloperInstructions(for agent: Agent, to text: String) async {
+        let next = Agent.seededInstructions(for: agent.role, override: text)
+        let previous = agent.resolvedDeveloperInstructions
+        agent.customInstructions = next
+        guard next != previous, agent.threadId != nil else { return }
+        await restartThread(for: agent)
+    }
+
+    func restartThread(for agent: Agent) async {
         let oldThreadId = agent.threadId
         if activeTurnAgentIDs.contains(agent.id) {
             await interruptTurn(for: agent)
@@ -378,7 +391,6 @@ final class AppSession: ObservableObject {
             try? await client?.threadArchive(threadId: oldThreadId)
             agentIDByThread.removeValue(forKey: oldThreadId)
         }
-        agent.workspacePath = path
         agent.threadId = nil
         itemsByAgent[agent.id] = []
         hydratedAgents.remove(agent.id)
@@ -387,6 +399,39 @@ final class AppSession: ObservableObject {
             items = []
         }
         await ensureThread(for: agent)
+    }
+
+    func deleteAgent(_ agent: Agent, in modelContext: ModelContext) async {
+        let id = agent.id
+        let threadId = agent.threadId
+
+        await interruptTurn(for: agent)
+
+        if let threadId {
+            try? await client?.threadArchive(threadId: threadId)
+            agentIDByThread.removeValue(forKey: threadId)
+        }
+
+        itemsByAgent.removeValue(forKey: id)
+        hydratedAgents.remove(id)
+        waitingAgentIDs.remove(id)
+        activeTurnAgentIDs.remove(id)
+        startingTurnAgentIDs.remove(id)
+        pendingInterruptAgentIDs.remove(id)
+        interruptedAgentIDs.remove(id)
+        liveHandoffs = liveHandoffs.filter { $0.value.from.id != id && $0.value.to.id != id }
+
+        if selectedAgentID == id {
+            selectedAgentID = nil
+            items = []
+        }
+
+        let records = (try? modelContext.fetch(FetchDescriptor<HandoffRecord>())) ?? []
+        for record in records where record.fromAgentId == id || record.toAgentId == id {
+            modelContext.delete(record)
+        }
+        modelContext.delete(agent)
+        try? modelContext.save()
     }
 
     func respondToPendingApproval(_ decision: ApprovalDecision) async {

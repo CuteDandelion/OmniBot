@@ -113,7 +113,7 @@ struct AgentHQRootView: View {
         }
         .onAppear {
             #if DEBUG
-            DebugSmoke.runIfNeeded(modelContext: modelContext, selectedAgentID: $session.selectedAgentID)
+            DebugSmoke.runIfNeeded(modelContext: modelContext, session: session)
             #endif
         }
     }

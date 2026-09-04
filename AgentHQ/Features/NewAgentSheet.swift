@@ -9,7 +9,7 @@ struct NewAgentSheet: View {
     @State private var name = ""
     @State private var role: RolePreset = .chiefOfStaff
     @State private var customRoleTitle = ""
-    @State private var customInstructions = ""
+    @State private var systemMessage = RolePreset.chiefOfStaff.developerInstructions
     @State private var mascot: MascotKind = RolePreset.chiefOfStaff.defaultMascot
     @State private var userPickedMascot = false
     @State private var workspacePath = ""
@@ -54,13 +54,16 @@ struct NewAgentSheet: View {
                                 .font(Tokens.body)
                                 .foregroundStyle(Tokens.fg)
                         }
-                        styledField {
-                            TextField("What should this agent do?", text: $customInstructions, axis: .vertical)
-                                .textFieldStyle(.plain)
-                                .font(Tokens.body)
-                                .foregroundStyle(Tokens.fg)
-                                .lineLimit(3...6)
-                        }
+                    }
+
+                    fieldLabel("System message")
+                    styledField {
+                        TextField("Role instructions for Codex…", text: $systemMessage, axis: .vertical)
+                            .textFieldStyle(.plain)
+                            .font(Tokens.body)
+                            .foregroundStyle(Tokens.fg)
+                            .lineLimit(4...8)
+                            .accessibilityIdentifier("system-message-field")
                     }
 
                     fieldLabel("Mascot")
@@ -103,11 +106,15 @@ struct NewAgentSheet: View {
         }
         .padding(20)
         .frame(width: 420)
-        .frame(minHeight: 480, maxHeight: 640)
+        .frame(minHeight: 520, maxHeight: 720)
         .background(Tokens.subtle)
-        .onChange(of: role) { _, newValue in
+        .onChange(of: role) { oldValue, newValue in
             if !userPickedMascot {
                 mascot = newValue.defaultMascot
+            }
+            let trimmed = systemMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == oldValue.developerInstructions {
+                systemMessage = newValue.developerInstructions
             }
         }
         .alert("Couldn’t create agent", isPresented: Binding(
@@ -141,14 +148,14 @@ struct NewAgentSheet: View {
     private func save() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedTitle = customRoleTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedBlurb = customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instructions = Agent.seededInstructions(for: role, override: systemMessage)
         let model = Self.resolvedModel
         let effort = Self.resolvedEffort
         let agent = Agent(
             name: trimmedName,
             role: role,
             customRoleTitle: role == .custom && !trimmedTitle.isEmpty ? trimmedTitle : nil,
-            customInstructions: role == .custom && !trimmedBlurb.isEmpty ? trimmedBlurb : nil,
+            customInstructions: instructions,
             mascot: mascot,
             workspacePath: workspacePath,
             model: model,

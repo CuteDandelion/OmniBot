@@ -19,11 +19,16 @@ final class Agent {
         role == .custom ? (customRoleTitle ?? "Custom") : role.defaultTitle
     }
 
+    /// Stored system/role message, falling back to the role preset when unset.
     var resolvedDeveloperInstructions: String {
-        if role == .custom {
-            return (customInstructions ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        let override = (customInstructions ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !override.isEmpty { return override }
         return role.developerInstructions
+    }
+
+    static func seededInstructions(for role: RolePreset, override: String? = nil) -> String {
+        let trimmed = (override ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? role.developerInstructions : trimmed
     }
 
     var displayWorkspacePath: String {

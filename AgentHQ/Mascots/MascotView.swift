@@ -14,14 +14,18 @@ struct MascotView: View {
             let effective = effectiveState
             let bounce = bounceOffset(t: t, state: effective)
             let eyeOpen = eyeOpenAmount(t: t, state: effective)
-            let workPhase = CGFloat(sin(t * 10))
+            let workPhase = workPhaseAmount(t: t, state: effective)
             let waitAngle = waitRotation(t: t, state: effective)
+            let glance = waitGlance(t: t, state: effective)
+            let waitPaw = waitPawLift(t: t, state: effective)
 
             ZStack(alignment: .bottomTrailing) {
                 MascotArt(
                     kind: kind,
                     eyeOpen: eyeOpen,
-                    workPhase: state == .working ? workPhase : 0,
+                    glance: glance,
+                    workPhase: workPhase,
+                    waitPaw: waitPaw,
                     alert: state == .needsApproval
                 )
                 .rotationEffect(.degrees(waitAngle))
@@ -66,9 +70,38 @@ struct MascotView: View {
         }
     }
 
+    private func workPhaseAmount(t: TimeInterval, state: MascotState) -> CGFloat {
+        guard state == .working else { return 0 }
+        if reduceMotion { return 0.4 }
+        return CGFloat(sin(t * 10))
+    }
+
     private func waitRotation(t: TimeInterval, state: MascotState) -> Double {
-        guard state == .waiting, !reduceMotion else { return 0 }
+        guard state == .waiting else { return 0 }
+        if reduceMotion { return 4 }
         return sin(t * 2 * .pi / 2.0) * 6
+    }
+
+    private func waitGlance(t: TimeInterval, state: MascotState) -> CGFloat {
+        guard state == .waiting else { return 0 }
+        if reduceMotion { return 0.7 }
+        let cycle = t.truncatingRemainder(dividingBy: 2.0)
+        if cycle < 0.55 { return 0 }
+        if cycle < 0.75 { return CGFloat((cycle - 0.55) / 0.2) }
+        if cycle < 1.15 { return 1 }
+        if cycle < 1.35 { return CGFloat(1 - (cycle - 1.15) / 0.2) }
+        return 0
+    }
+
+    private func waitPawLift(t: TimeInterval, state: MascotState) -> CGFloat {
+        guard state == .waiting, !reduceMotion else { return 0 }
+        let cycle = t.truncatingRemainder(dividingBy: 2.0)
+        if cycle < 1.35 { return 0 }
+        let local = cycle - 1.35
+        if local < 0.12 { return CGFloat(local / 0.12) }
+        if local < 0.28 { return 1 }
+        if local < 0.5 { return CGFloat(1 - (local - 0.28) / 0.22) }
+        return 0
     }
 
     private func statusPip(for state: MascotState) -> some View {
@@ -96,7 +129,9 @@ struct MascotView: View {
 private struct MascotArt: View {
     var kind: MascotKind
     var eyeOpen: CGFloat
+    var glance: CGFloat
     var workPhase: CGFloat
+    var waitPaw: CGFloat
     var alert: Bool
 
     var body: some View {
@@ -106,6 +141,9 @@ private struct MascotArt: View {
                 artwork(size: s)
                 if workPhase != 0 {
                     paws(size: s)
+                }
+                if waitPaw != 0 {
+                    tappingPaw(size: s)
                 }
                 if alert {
                     alertMark(size: s)
@@ -271,6 +309,7 @@ private struct MascotArt: View {
             Circle()
                 .fill(Color.black)
                 .frame(width: r * 2 * pupilScale, height: r * 2 * pupilScale)
+                .offset(x: glance * r * 0.45)
         }
         .frame(width: r * 2, height: r * 2)
         .scaleEffect(x: 1, y: max(0.06, eyeOpen))
@@ -321,6 +360,14 @@ private struct MascotArt: View {
                 .frame(width: 8 * k, height: 5 * k)
                 .offset(x: 8 * k, y: 18 * k + lift)
         }
+    }
+
+    private func tappingPaw(size s: CGFloat) -> some View {
+        let k = s / 48
+        return Capsule()
+            .fill(palette.furDark)
+            .frame(width: 8 * k, height: 5 * k)
+            .offset(x: 8 * k, y: 18 * k - waitPaw * 4.5 * k)
     }
 
     private func alertMark(size s: CGFloat) -> some View {
@@ -446,7 +493,7 @@ private struct MascotCatalog: View {
                         .font(Tokens.caption)
                         .foregroundStyle(Tokens.muted)
                         .frame(width: 64, alignment: .leading)
-                    ForEach([MascotState.idle, .hover], id: \.self) { state in
+                    ForEach([MascotState.idle, .hover, .waiting, .working], id: \.self) { state in
                         MascotView(kind: kind, state: state, size: 48)
                     }
                 }
@@ -465,4 +512,14 @@ private struct MascotCatalog: View {
 #Preview("Mascots Dark") {
     MascotCatalog()
         .preferredColorScheme(.dark)
+}
+
+#Preview("Waiting") {
+    HStack(spacing: 16) {
+        ForEach(MascotKind.allCases) { kind in
+            MascotView(kind: kind, state: .waiting, size: 48)
+        }
+    }
+    .padding(16)
+    .background(Tokens.canvas)
 }

@@ -2,13 +2,14 @@ import SwiftUI
 
 struct TranscriptView: View {
     var items: [ChatItem]
+    var viewerAgentID: UUID?
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(items) { item in
-                        ChatItemRow(item: item)
+                        ChatItemRow(item: item, viewerAgentID: viewerAgentID)
                             .id(item.id)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -33,7 +34,7 @@ struct TranscriptView: View {
             case .assistant(let text): return "a:\(item.id):\(text)"
             case .working(let detail): return "w:\(detail ?? "")"
             case .diff(let path, let summary): return "d:\(path):\(summary)"
-            case .handoff(let record): return "h:\(record.id.uuidString)"
+            case .handoff(let record): return "h:\(record.id.uuidString):\(record.status)"
             }
         }.joined(separator: "\n")
     }
@@ -41,6 +42,7 @@ struct TranscriptView: View {
 
 private struct ChatItemRow: View {
     var item: ChatItem
+    var viewerAgentID: UUID?
 
     var body: some View {
         switch item.kind {
@@ -93,9 +95,13 @@ private struct ChatItemRow: View {
             )
             .accessibilityIdentifier("chat-item-diff")
         case .handoff(let record):
-            Text(record.brief)
-                .font(Tokens.caption)
-                .foregroundStyle(Tokens.muted)
+            if let viewerAgentID {
+                HandoffCard(record: record, viewerAgentID: viewerAgentID)
+            } else {
+                Text(record.brief)
+                    .font(Tokens.caption)
+                    .foregroundStyle(Tokens.muted)
+            }
         }
     }
 

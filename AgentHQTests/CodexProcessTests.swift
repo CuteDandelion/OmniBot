@@ -207,7 +207,7 @@ final class CodexProcessTests: XCTestCase {
 }
 
 final class MCPMainTests: XCTestCase {
-    func testInitializeAndEmptyToolsList() throws {
+    func testInitializeAndHandoffToolsList() throws {
         let initLine = Data(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"codex","version":"1"}}}"#.utf8)
         let initData = try XCTUnwrap(MCPMain.response(for: initLine))
         let initObj = try XCTUnwrap(JSONSerialization.jsonObject(with: initData) as? [String: Any])
@@ -215,13 +215,36 @@ final class MCPMainTests: XCTestCase {
         let result = try XCTUnwrap(initObj["result"] as? [String: Any])
         let serverInfo = try XCTUnwrap(result["serverInfo"] as? [String: Any])
         XCTAssertEqual(serverInfo["name"] as? String, "agenthq")
+        let capabilities = try XCTUnwrap(result["capabilities"] as? [String: Any])
+        let toolCaps = try XCTUnwrap(capabilities["tools"] as? [String: Any])
+        XCTAssertEqual(toolCaps["listChanged"] as? Bool, true)
 
         let listLine = Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.utf8)
         let listData = try XCTUnwrap(MCPMain.response(for: listLine))
         let listObj = try XCTUnwrap(JSONSerialization.jsonObject(with: listData) as? [String: Any])
         let listResult = try XCTUnwrap(listObj["result"] as? [String: Any])
-        XCTAssertEqual((listResult["tools"] as? [Any])?.count, 0)
+        let listed = try XCTUnwrap(listResult["tools"] as? [[String: Any]])
+        XCTAssertEqual(listed.count, 1)
+        XCTAssertEqual(listed.first?["name"] as? String, "handoff")
 
         XCTAssertNil(MCPMain.response(for: Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8)))
+    }
+
+    func testToolsListDescriptionIncludesRoster() throws {
+        let agentID = UUID()
+        MCPMain.rosterOverride = [
+            HandoffRosterEntry(id: agentID.uuidString, name: "Ada", role: "Chief of Staff"),
+        ]
+        defer { MCPMain.rosterOverride = nil }
+
+        let listLine = Data(#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#.utf8)
+        let listData = try XCTUnwrap(MCPMain.response(for: listLine))
+        let listObj = try XCTUnwrap(JSONSerialization.jsonObject(with: listData) as? [String: Any])
+        let listResult = try XCTUnwrap(listObj["result"] as? [String: Any])
+        let tools = try XCTUnwrap(listResult["tools"] as? [[String: Any]])
+        let description = try XCTUnwrap(tools.first?["description"] as? String)
+        XCTAssertTrue(description.contains(agentID.uuidString))
+        XCTAssertTrue(description.contains("Ada"))
+        XCTAssertTrue(description.contains("Chief of Staff"))
     }
 }

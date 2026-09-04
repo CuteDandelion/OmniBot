@@ -2,10 +2,11 @@ import SwiftUI
 
 struct AgentRow: View {
     var agent: Agent
+    @EnvironmentObject private var session: AppSession
 
     var body: some View {
         HStack(spacing: 8) {
-            MascotView(kind: agent.mascot, state: .idle, size: 32)
+            MascotView(kind: agent.mascot, state: session.mascotState(for: agent.id), size: 32)
             VStack(alignment: .leading, spacing: 1) {
                 Text(agent.name)
                     .font(Tokens.body)

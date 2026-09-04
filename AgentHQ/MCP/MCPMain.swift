@@ -1,10 +1,36 @@
 import AppKit
 import Foundation
 
-/// Stdio MCP stub so `codex app-server` can attach this binary without opening a second GUI.
+/// Stdio MCP server. `codex app-server` attaches this binary with `--mcp`.
 enum MCPMain {
+    static var rosterOverride: [HandoffRosterEntry]? {
+        get { withState { _rosterOverride } }
+        set { withState { _rosterOverride = newValue } }
+    }
+
+    private static let stateLock = NSLock()
+    private static var _rosterOverride: [HandoffRosterEntry]?
+    private static var cachedRoster: [HandoffRosterEntry] = []
+    private static var ipc: HandoffIPCClient?
+    private static var emitListChanged = false
+
     static func run() {
         NSApplication.shared.setActivationPolicy(.prohibited)
+        let socketPath = ProcessInfo.processInfo.environment["AGENTHQ_HANDOFF_SOCKET"]
+            ?? CodexProcess.handoffSocketURL.path
+        let client = HandoffIPCClient(path: socketPath)
+        client.onRoster = { entries in
+            let shouldEmit = withState { () -> Bool in
+                cachedRoster = entries
+                return emitListChanged
+            }
+            if shouldEmit {
+                emitToolsListChanged()
+            }
+        }
+        client.start()
+        ipc = client
+
         let stdin = FileHandle.standardInput
         var buffer = Data()
         while true {
@@ -12,14 +38,23 @@ enum MCPMain {
             if chunk.isEmpty { break }
             buffer.append(chunk)
             while let message = pullMessage(from: &buffer) {
-                if let response = response(for: message) {
-                    FileHandle.standardOutput.write(response)
+                if let response = handle(message) {
+                    writeStdout(response)
                 }
             }
         }
+        client.stop()
     }
 
     static func response(for line: Data) -> Data? {
+        handle(line)
+    }
+
+    static func currentRoster() -> [HandoffRosterEntry] {
+        withState { _rosterOverride ?? cachedRoster }
+    }
+
+    private static func handle(_ line: Data) -> Data? {
         var trimmed = line
         if trimmed.last == 0x0D {
             trimmed.removeLast()
@@ -31,6 +66,9 @@ enum MCPMain {
         let id = object["id"]
         guard let method else { return nil }
         if id == nil {
+            if method == "notifications/initialized" {
+                withState { emitListChanged = true }
+            }
             return nil
         }
 
@@ -42,17 +80,143 @@ enum MCPMain {
                 id: id,
                 result: [
                     "protocolVersion": protocolVersion,
-                    "capabilities": ["tools": ["listChanged": false]],
+                    "capabilities": ["tools": ["listChanged": true]],
                     "serverInfo": ["name": "agenthq", "version": "0.1.0"],
                 ]
             )
         case "tools/list":
-            return encode(id: id, result: ["tools": []])
+            return encode(id: id, result: ["tools": [HandoffTool.definition(agents: resolvedRoster())]])
+        case "tools/call":
+            return handleToolsCall(id: id, params: object["params"] as? [String: Any] ?? [:])
         case "ping":
             return encode(id: id, result: [:])
         default:
             return encodeError(id: id, code: -32601, message: "Method not found")
         }
+    }
+
+    private static func resolvedRoster() -> [HandoffRosterEntry] {
+        let snapshot = withState { _rosterOverride ?? cachedRoster }
+        if !snapshot.isEmpty || withState({ _rosterOverride != nil }) {
+            return snapshot
+        }
+        if let ipc {
+            if let response = try? ipc.request(method: "roster", timeout: 1.5),
+               let agents = response["agents"] as? [Any] {
+                let parsed = agents.compactMap(HandoffRosterEntry.fromJSON)
+                withState { cachedRoster = parsed }
+                return parsed
+            }
+        }
+        return withState { cachedRoster }
+    }
+
+    private static func withState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    private static func writeStdout(_ data: Data) {
+        stateLock.lock()
+        FileHandle.standardOutput.write(data)
+        stateLock.unlock()
+    }
+
+    private static func handleToolsCall(id: Any?, params: [String: Any]) -> Data? {
+        let name = params["name"] as? String ?? ""
+        guard name == HandoffTool.name else {
+            return encode(
+                id: id,
+                result: [
+                    "content": [["type": "text", "text": "Unknown tool"]],
+                    "isError": true,
+                ]
+            )
+        }
+        let arguments = jsonObject(params["arguments"])
+        let meta = jsonObject(params["_meta"])
+        guard let agentID = arguments["agent_id"] as? String,
+              let brief = arguments["brief"] as? String else {
+            return encodeError(id: id, code: -32602, message: "agent_id and brief are required")
+        }
+        var payload: [String: Any] = [
+            "agent_id": agentID,
+            "brief": brief,
+        ]
+        if let threadID = threadID(from: meta) {
+            payload["thread_id"] = threadID
+        }
+        do {
+            let response = try (ipc ?? makeEphemeralClient()).request(
+                method: "handoff",
+                params: payload,
+                timeout: 60 * 60
+            )
+            if response["ok"] as? Bool == true, let summary = response["summary"] as? String {
+                return encode(
+                    id: id,
+                    result: [
+                        "content": [["type": "text", "text": summary]],
+                    ]
+                )
+            }
+            let message = response["error"] as? String ?? "Handoff failed"
+            return encode(
+                id: id,
+                result: [
+                    "content": [["type": "text", "text": message]],
+                    "isError": true,
+                ]
+            )
+        } catch {
+            return encode(
+                id: id,
+                result: [
+                    "content": [[
+                        "type": "text",
+                        "text": (error as? LocalizedError)?.errorDescription ?? error.localizedDescription,
+                    ]],
+                    "isError": true,
+                ]
+            )
+        }
+    }
+
+    private static func makeEphemeralClient() -> HandoffIPCClient {
+        let path = ProcessInfo.processInfo.environment["AGENTHQ_HANDOFF_SOCKET"]
+            ?? CodexProcess.handoffSocketURL.path
+        let client = HandoffIPCClient(path: path)
+        client.start()
+        return client
+    }
+
+    private static func threadID(from meta: [String: Any]) -> String? {
+        if let value = meta["threadId"] as? String, !value.isEmpty { return value }
+        if let value = meta["thread_id"] as? String, !value.isEmpty { return value }
+        let wrapped = jsonObject(meta["x-codex-turn-metadata"])
+        if let value = wrapped["threadId"] as? String, !value.isEmpty { return value }
+        if let value = wrapped["thread_id"] as? String, !value.isEmpty { return value }
+        return nil
+    }
+
+    private static func jsonObject(_ value: Any?) -> [String: Any] {
+        if let object = value as? [String: Any] { return object }
+        if let text = value as? String,
+           let data = text.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return object
+        }
+        return [:]
+    }
+
+    private static func emitToolsListChanged() {
+        guard var data = try? JSONSerialization.data(
+            withJSONObject: ["jsonrpc": "2.0", "method": "notifications/tools/list_changed"],
+            options: []
+        ) else { return }
+        data.append(0x0A)
+        writeStdout(data)
     }
 
     private static func pullMessage(from buffer: inout Data) -> Data? {

@@ -57,6 +57,8 @@ targets:
       - path: AgentHQTests
     dependencies:
       - target: AgentHQ
+      - package: CodexClient
+        product: CodexClient
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: local.agenthq.tests

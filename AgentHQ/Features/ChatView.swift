@@ -3,6 +3,7 @@ import SwiftUI
 
 struct ChatView: View {
     var selectedAgentID: UUID?
+    @EnvironmentObject private var session: AppSession
     @Query private var agents: [Agent]
 
     private var selectedAgent: Agent? {
@@ -11,13 +12,18 @@ struct ChatView: View {
     }
 
     var body: some View {
-        if let agent = selectedAgent {
+        if session.showsSetupEmptyState {
+            EmptyStateView()
+        } else if let agent = selectedAgent {
             VStack(spacing: 0) {
                 AgentHeader(agent: agent)
                 Divider()
                     .overlay(Tokens.border)
                 Tokens.canvas
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                Divider()
+                    .overlay(Tokens.border)
+                ComposerView(agent: agent)
             }
             .background(Tokens.canvas)
         } else {

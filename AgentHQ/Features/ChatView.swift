@@ -45,7 +45,7 @@ struct ChatView: View {
                     if let warning = session.workspaceWarning {
                         chatBanner(warning, identifier: "workspace-missing-banner")
                     }
-                    TranscriptView(items: session.items)
+                    TranscriptView(items: session.items, viewerAgentID: agent.id)
                     Divider()
                         .overlay(Tokens.border)
                     ComposerView(agent: agent)

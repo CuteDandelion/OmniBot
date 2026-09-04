@@ -56,7 +56,11 @@ struct AgentHQApp: App {
 struct AgentHQRootView: View {
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var session: AppSession
-    @State private var selectedAgentID: UUID?
+    @Query(sort: \Agent.createdAt, order: .forward) private var agents: [Agent]
+
+    private var rosterToken: String {
+        agents.map { "\($0.id.uuidString)|\($0.name)|\($0.displayRole)" }.joined(separator: ";")
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -82,15 +86,22 @@ struct AgentHQRootView: View {
             }
 
             NavigationSplitView {
-                SidebarView(selectedAgentID: $selectedAgentID)
+                SidebarView(selectedAgentID: $session.selectedAgentID)
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             } detail: {
-                ChatView(selectedAgentID: selectedAgentID)
+                ChatView(selectedAgentID: session.selectedAgentID)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Tokens.canvas)
-        .task { await session.start() }
+        .task {
+            session.configureHandoff(modelContext: modelContext)
+            session.publishRoster(agents)
+            await session.start()
+        }
+        .onChange(of: rosterToken) { _, _ in
+            session.publishRoster(agents)
+        }
         .sheet(isPresented: Binding(
             get: { session.pendingApproval != nil },
             set: { _ in }
@@ -102,7 +113,7 @@ struct AgentHQRootView: View {
         }
         .onAppear {
             #if DEBUG
-            DebugSmoke.runIfNeeded(modelContext: modelContext, selectedAgentID: $selectedAgentID)
+            DebugSmoke.runIfNeeded(modelContext: modelContext, selectedAgentID: $session.selectedAgentID)
             #endif
         }
     }

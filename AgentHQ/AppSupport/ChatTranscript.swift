@@ -31,6 +31,7 @@ enum ChatTranscript {
         case "userMessage":
             let text = userText(from: object["content"])
             guard !text.isEmpty else { return [] }
+            if text.hasPrefix("Handoff from ") { return [] }
             return [ChatItem(id: id, kind: .user(text))]
         case "agentMessage":
             return [ChatItem(id: id, kind: .assistant(object["text"]?.string ?? ""))]
@@ -75,6 +76,19 @@ enum ChatTranscript {
 
     static func removeWorking(from items: inout [ChatItem]) {
         items.removeAll { $0.id == workingID }
+    }
+
+    static func appendHandoff(_ record: HandoffRecord, to items: inout [ChatItem]) {
+        let item = ChatItem(id: "handoff-\(record.id.uuidString)", kind: .handoff(record))
+        if items.contains(where: { $0.id == item.id }) { return }
+        insertBeforeWorking(item, on: &items)
+    }
+
+    static func replaceHandoff(_ record: HandoffRecord, on items: inout [ChatItem]) {
+        let id = "handoff-\(record.id.uuidString)"
+        if let index = items.firstIndex(where: { $0.id == id }) {
+            items[index] = ChatItem(id: id, kind: .handoff(record))
+        }
     }
 
     static func ingest(_ incoming: [ChatItem], into items: inout [ChatItem]) {

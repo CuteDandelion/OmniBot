@@ -178,14 +178,18 @@ final class AppSession: ObservableObject {
         }
         orch.onEvent = { [weak self] record in
             self?.refreshHandoff(record)
+            if record.status == "failed" {
+                self?.resumeHandoffWaiter(record.id, error: HandoffError.interrupted)
+            }
         }
+        orch.failAll()
         orchestrator = orch
 
         let bridge = MCPBridge()
         bridge.roster = { [weak self] in self?.cachedRoster ?? [] }
         bridge.handleHandoff = { [weak self] toID, brief, threadId in
             guard let self else { throw HandoffError.failed("Session unavailable") }
-            guard let fromID = self.resolveSender(threadId: threadId) else {
+            guard let fromID = self.resolveHandoffSender(threadId: threadId) else {
                 throw HandoffError.unknownAgent
             }
             return try await orch.handoff(from: fromID, to: toID, brief: brief)
@@ -237,7 +241,6 @@ final class AppSession: ObservableObject {
         guard !AgentHQApp.isRunningTests else { return }
         guard !didStart else { return }
         didStart = true
-        mcpBridge?.start()
         await retry()
     }
 
@@ -246,7 +249,21 @@ final class AppSession: ObservableObject {
         let generation = generation
         reconnectUsed = false
         banner = nil
+        guard ensureHandoffSocket() else { return }
         await connect(generation: generation, allowReconnect: true)
+    }
+
+    private func ensureHandoffSocket() -> Bool {
+        guard let mcpBridge else { return true }
+        do {
+            try mcpBridge.start()
+            return true
+        } catch {
+            banner = "Handoff socket failed to listen"
+            connectionState = .disconnected
+            writeEvidence()
+            return false
+        }
     }
 
     func shutdown() {
@@ -717,9 +734,12 @@ final class AppSession: ObservableObject {
         do {
             _ = try await client.threadResume(threadId: threadId)
             agentIDByThread[threadId] = agent.id
-            if itemsByAgent[agent.id] == nil {
+            if !hydratedAgents.contains(agent.id) {
                 let read = try await client.threadRead(threadId: threadId, includeTurns: true)
-                itemsByAgent[agent.id] = ChatTranscript.items(from: read.thread)
+                itemsByAgent[agent.id] = ChatTranscript.mergePreservingHandoffs(
+                    existing: itemsByAgent[agent.id] ?? [],
+                    incoming: ChatTranscript.items(from: read.thread)
+                )
             }
             hydratedAgents.insert(agent.id)
             guard generation == selectGeneration else { return }
@@ -772,11 +792,14 @@ final class AppSession: ObservableObject {
         activeTurnAgentIDs.remove(agentID)
         startingTurnAgentIDs.remove(agentID)
         pendingInterruptAgentIDs.remove(agentID)
-        if let waiter = handoffTurnWaiters.removeValue(forKey: agentID) {
-            if interruptedAgentIDs.contains(agentID) {
-                waiter.resume(throwing: HandoffError.interrupted)
-            } else {
-                waiter.resume(returning: lastAssistantSummary(for: agentID))
+        let recordIDs = liveHandoffs.compactMap { id, pair in pair.to.id == agentID ? id : nil }
+        for recordID in recordIDs {
+            if let waiter = handoffTurnWaiters.removeValue(forKey: recordID) {
+                if interruptedAgentIDs.contains(agentID) {
+                    waiter.resume(throwing: HandoffError.interrupted)
+                } else {
+                    waiter.resume(returning: lastAssistantSummary(for: agentID))
+                }
             }
         }
     }
@@ -800,13 +823,22 @@ final class AppSession: ObservableObject {
         }
     }
 
-    private func resolveSender(threadId: String?) -> UUID? {
-        if let threadId, let id = agentIDByThread[threadId] {
+    func resolveHandoffSender(threadId: String?) -> UUID? {
+        guard let threadId, !threadId.isEmpty else {
+            banner = "Handoff missing Codex thread id"
+            return nil
+        }
+        if let id = agentIDByThread[threadId] {
             return id
         }
-        let working = activeTurnAgentIDs.subtracting(waitingAgentIDs)
-        if working.count == 1 { return working.first }
-        return selectedAgentID
+        banner = "Handoff sender thread is unknown"
+        return nil
+    }
+
+    private func resumeHandoffWaiter(_ recordID: UUID, error: Error) {
+        if let waiter = handoffTurnWaiters.removeValue(forKey: recordID) {
+            waiter.resume(throwing: error)
+        }
     }
 
     private func insertHandoffCards(_ record: HandoffRecord) {
@@ -828,7 +860,6 @@ final class AppSession: ObservableObject {
     private func performHandoffTurn(record: HandoffRecord, from: Agent, to: Agent) async throws -> String {
         waitingAgentIDs.insert(from.id)
         liveHandoffs[record.id] = (from, to)
-        insertHandoffCards(record)
         defer {
             waitingAgentIDs.remove(from.id)
             liveHandoffs.removeValue(forKey: record.id)
@@ -836,12 +867,15 @@ final class AppSession: ObservableObject {
         }
 
         await ensureThread(for: to, select: false)
+        try throwIfHandoffAborted(record, targetID: to.id)
         guard let threadId = to.threadId, client != nil else {
             throw HandoffError.failed("Target has no thread")
         }
         guard workspaceExists(to.workspacePath) else {
             throw HandoffError.failed("Target workspace is missing")
         }
+
+        insertHandoffCards(record)
 
         let prompt = HandoffPrompt.make(
             fromName: from.name,
@@ -850,8 +884,7 @@ final class AppSession: ObservableObject {
             brief: record.brief
         )
 
-        interruptedAgentIDs.remove(to.id)
-        pendingInterruptAgentIDs.remove(to.id)
+        try throwIfHandoffAborted(record, targetID: to.id)
 
         var current = itemsByAgent[to.id] ?? []
         ChatTranscript.setWorking(detail: nil, on: &current)
@@ -859,34 +892,40 @@ final class AppSession: ObservableObject {
         activeTurnAgentIDs.insert(to.id)
         startingTurnAgentIDs.insert(to.id)
 
-        do {
-            return try await withCheckedThrowingContinuation { continuation in
-                handoffTurnWaiters[to.id] = continuation
-                Task { @MainActor in
-                    do {
-                        _ = try await self.client?.turnStart(
-                            TurnStartParams(
-                                threadId: threadId,
-                                input: [.text(prompt)],
-                                model: to.model.isEmpty ? nil : to.model,
-                                effort: to.reasoningEffort.isEmpty ? nil : to.reasoningEffort
-                            )
+        return try await withCheckedThrowingContinuation { continuation in
+            handoffTurnWaiters[record.id] = continuation
+            Task { @MainActor in
+                do {
+                    try self.throwIfHandoffAborted(record, targetID: to.id)
+                    _ = try await self.client?.turnStart(
+                        TurnStartParams(
+                            threadId: threadId,
+                            input: [.text(prompt)],
+                            model: to.model.isEmpty ? nil : to.model,
+                            effort: to.reasoningEffort.isEmpty ? nil : to.reasoningEffort
                         )
-                        self.startingTurnAgentIDs.remove(to.id)
-                        if self.pendingInterruptAgentIDs.contains(to.id) {
-                            self.pendingInterruptAgentIDs.remove(to.id)
-                            await self.performInterrupt(for: to, threadId: threadId)
-                        }
-                    } catch {
-                        self.startingTurnAgentIDs.remove(to.id)
-                        if let waiter = self.handoffTurnWaiters.removeValue(forKey: to.id) {
-                            waiter.resume(throwing: error)
-                        }
+                    )
+                    self.startingTurnAgentIDs.remove(to.id)
+                    if self.pendingInterruptAgentIDs.contains(to.id) {
+                        self.pendingInterruptAgentIDs.remove(to.id)
+                        await self.performInterrupt(for: to, threadId: threadId)
+                    }
+                } catch {
+                    self.startingTurnAgentIDs.remove(to.id)
+                    if let waiter = self.handoffTurnWaiters.removeValue(forKey: record.id) {
+                        waiter.resume(throwing: error)
                     }
                 }
             }
-        } catch {
-            throw error
+        }
+    }
+
+    private func throwIfHandoffAborted(_ record: HandoffRecord, targetID: UUID) throws {
+        if record.status == "failed"
+            || Task.isCancelled
+            || interruptedAgentIDs.contains(targetID)
+            || pendingInterruptAgentIDs.contains(targetID) {
+            throw HandoffError.interrupted
         }
     }
 

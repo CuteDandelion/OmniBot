@@ -3,7 +3,13 @@ import Foundation
 
 /// Stdio MCP server. `codex app-server` attaches this binary with `--mcp`.
 enum MCPMain {
-    static var rosterOverride: [HandoffRosterEntry]?
+    static var rosterOverride: [HandoffRosterEntry]? {
+        get { withState { _rosterOverride } }
+        set { withState { _rosterOverride = newValue } }
+    }
+
+    private static let stateLock = NSLock()
+    private static var _rosterOverride: [HandoffRosterEntry]?
     private static var cachedRoster: [HandoffRosterEntry] = []
     private static var ipc: HandoffIPCClient?
     private static var emitListChanged = false
@@ -14,8 +20,11 @@ enum MCPMain {
             ?? CodexProcess.handoffSocketURL.path
         let client = HandoffIPCClient(path: socketPath)
         client.onRoster = { entries in
-            cachedRoster = entries
-            if emitListChanged {
+            let shouldEmit = withState { () -> Bool in
+                cachedRoster = entries
+                return emitListChanged
+            }
+            if shouldEmit {
                 emitToolsListChanged()
             }
         }
@@ -30,7 +39,7 @@ enum MCPMain {
             buffer.append(chunk)
             while let message = pullMessage(from: &buffer) {
                 if let response = handle(message) {
-                    FileHandle.standardOutput.write(response)
+                    writeStdout(response)
                 }
             }
         }
@@ -42,7 +51,7 @@ enum MCPMain {
     }
 
     static func currentRoster() -> [HandoffRosterEntry] {
-        rosterOverride ?? cachedRoster
+        withState { _rosterOverride ?? cachedRoster }
     }
 
     private static func handle(_ line: Data) -> Data? {
@@ -58,7 +67,7 @@ enum MCPMain {
         guard let method else { return nil }
         if id == nil {
             if method == "notifications/initialized" {
-                emitListChanged = true
+                withState { emitListChanged = true }
             }
             return nil
         }
@@ -87,17 +96,31 @@ enum MCPMain {
     }
 
     private static func resolvedRoster() -> [HandoffRosterEntry] {
-        if let rosterOverride { return rosterOverride }
-        if !cachedRoster.isEmpty { return cachedRoster }
+        let snapshot = withState { _rosterOverride ?? cachedRoster }
+        if !snapshot.isEmpty || withState({ _rosterOverride != nil }) {
+            return snapshot
+        }
         if let ipc {
             if let response = try? ipc.request(method: "roster", timeout: 1.5),
                let agents = response["agents"] as? [Any] {
                 let parsed = agents.compactMap(HandoffRosterEntry.fromJSON)
-                cachedRoster = parsed
+                withState { cachedRoster = parsed }
                 return parsed
             }
         }
-        return cachedRoster
+        return withState { cachedRoster }
+    }
+
+    private static func withState<T>(_ body: () -> T) -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return body()
+    }
+
+    private static func writeStdout(_ data: Data) {
+        stateLock.lock()
+        FileHandle.standardOutput.write(data)
+        stateLock.unlock()
     }
 
     private static func handleToolsCall(id: Any?, params: [String: Any]) -> Data? {
@@ -193,7 +216,7 @@ enum MCPMain {
             options: []
         ) else { return }
         data.append(0x0A)
-        FileHandle.standardOutput.write(data)
+        writeStdout(data)
     }
 
     private static func pullMessage(from buffer: inout Data) -> Data? {

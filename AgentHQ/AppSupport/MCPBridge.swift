@@ -10,7 +10,9 @@ final class MCPBridge {
 
     private var server: UnixJSONServer?
 
-    func start() {
+    var isListening: Bool { server != nil }
+
+    func start() throws {
         stop()
         let server = UnixJSONServer(path: socketPath.path)
         server.onConnect = { [weak self] fd in
@@ -25,12 +27,8 @@ final class MCPBridge {
                 reply(response)
             }
         }
-        do {
-            try server.start()
-            self.server = server
-        } catch {
-            self.server = nil
-        }
+        try server.start()
+        self.server = server
     }
 
     func stop() {

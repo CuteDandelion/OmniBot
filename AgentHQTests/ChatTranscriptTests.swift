@@ -120,6 +120,24 @@ final class ChatTranscriptTests: XCTestCase {
         XCTAssertFalse(ChatTranscript.apply(delta, threadId: "thread-1", to: &items))
         XCTAssertTrue(items.isEmpty)
     }
+
+    func testMergePreservesHandoffCards() {
+        let record = HandoffRecord(
+            fromAgentId: UUID(),
+            toAgentId: UUID(),
+            brief: "list files",
+            status: "running"
+        )
+        var existing: [ChatItem] = []
+        ChatTranscript.appendHandoff(record, to: &existing)
+        ChatTranscript.setWorking(detail: "ls", on: &existing)
+        let incoming = [
+            ChatItem(id: "u1", kind: .user("hello")),
+            ChatItem(id: "a1", kind: .assistant("Hi")),
+        ]
+        let merged = ChatTranscript.mergePreservingHandoffs(existing: existing, incoming: incoming)
+        XCTAssertEqual(merged.map(\.id), ["u1", "a1", "handoff-\(record.id.uuidString)"])
+    }
 }
 
 private extension ChatItem {

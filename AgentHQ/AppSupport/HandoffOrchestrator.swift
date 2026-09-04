@@ -28,9 +28,11 @@ enum HandoffError: Error, Equatable, LocalizedError {
 final class HandoffOrchestrator {
     private let modelContext: ModelContext
     private var waiters: [UUID: CheckedContinuation<String, Error>] = [:]
+    private var tasks: [UUID: Task<Void, Never>] = [:]
 
     var runTarget: ((HandoffRecord, Agent, Agent) async throws -> String)?
     var onEvent: ((HandoffRecord) -> Void)?
+    var prepareExecute: (() async -> Void)?
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
@@ -41,14 +43,16 @@ final class HandoffOrchestrator {
         onEvent?(record)
         return try await withCheckedThrowingContinuation { continuation in
             waiters[record.id] = continuation
-            Task { @MainActor in
+            let task = Task { @MainActor in
                 do {
                     let summary = try await self.execute(record)
                     self.complete(record, summary: summary)
                 } catch {
                     self.fail(record, error: error)
                 }
+                self.tasks.removeValue(forKey: record.id)
             }
+            self.tasks[record.id] = task
         }
     }
 
@@ -77,7 +81,7 @@ final class HandoffOrchestrator {
         guard agent(id: from) != nil, agent(id: to) != nil else { throw HandoffError.unknownAgent }
 
         let inflight = inFlightRecords()
-        if inflight.contains(where: { $0.fromAgentId == from }) {
+        if inflight.contains(where: { $0.fromAgentId == from || $0.toAgentId == to }) {
             throw HandoffError.alreadyPending
         }
         if wouldCycle(from: from, to: to, inflight: inflight) {
@@ -91,6 +95,8 @@ final class HandoffOrchestrator {
     }
 
     private func execute(_ record: HandoffRecord) async throws -> String {
+        await prepareExecute?()
+        try throwIfCancelled(record)
         guard let fromAgent = agent(id: record.fromAgentId),
               let toAgent = agent(id: record.toAgentId) else {
             throw HandoffError.unknownAgent
@@ -98,6 +104,7 @@ final class HandoffOrchestrator {
         record.status = "running"
         persist()
         onEvent?(record)
+        try throwIfCancelled(record)
         guard let runTarget else {
             throw HandoffError.failed("Handoff runner unavailable")
         }
@@ -105,21 +112,33 @@ final class HandoffOrchestrator {
     }
 
     private func complete(_ record: HandoffRecord, summary: String) {
-        guard let waiter = waiters.removeValue(forKey: record.id) else { return }
+        guard record.status != "failed" else { return }
         record.status = "done"
         record.resultSummary = summary
         persist()
         onEvent?(record)
-        waiter.resume(returning: summary)
+        if let waiter = waiters.removeValue(forKey: record.id) {
+            waiter.resume(returning: summary)
+        }
     }
 
     private func fail(_ record: HandoffRecord, error: Error) {
-        guard let waiter = waiters.removeValue(forKey: record.id) else { return }
+        guard record.status != "done" else { return }
         record.status = "failed"
         record.resultSummary = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         persist()
         onEvent?(record)
-        waiter.resume(throwing: error)
+        tasks[record.id]?.cancel()
+        tasks.removeValue(forKey: record.id)
+        if let waiter = waiters.removeValue(forKey: record.id) {
+            waiter.resume(throwing: error)
+        }
+    }
+
+    private func throwIfCancelled(_ record: HandoffRecord) throws {
+        if record.status == "failed" || Task.isCancelled {
+            throw HandoffError.interrupted
+        }
     }
 
     private func wouldCycle(from: UUID, to: UUID, inflight: [HandoffRecord]) -> Bool {

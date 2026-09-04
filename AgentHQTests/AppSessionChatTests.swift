@@ -271,6 +271,19 @@ final class AppSessionChatTests: XCTestCase {
         )
         XCTAssertGreaterThanOrEqual(env.loggedDecisions().count, 1)
     }
+
+    func testHandoffSenderRequiresThreadId() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        XCTAssertEqual(env.session.resolveHandoffSender(threadId: env.agent.threadId), env.agent.id)
+        XCTAssertNil(env.session.resolveHandoffSender(threadId: nil))
+        XCTAssertEqual(env.session.banner, "Handoff missing Codex thread id")
+        XCTAssertNil(env.session.resolveHandoffSender(threadId: "missing-thread"))
+        XCTAssertEqual(env.session.banner, "Handoff sender thread is unknown")
+    }
 }
 
 private final class Collector: @unchecked Sendable {

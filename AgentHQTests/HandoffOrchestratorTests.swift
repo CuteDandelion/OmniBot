@@ -76,6 +76,87 @@ final class HandoffOrchestratorTests: XCTestCase {
         await gate.open()
     }
 
+    func testInterruptBeforeRunTargetStaysFailed() async throws {
+        let env = try HandoffTestEnv()
+        let hold = AsyncGate()
+        var ran = false
+        env.orchestrator.prepareExecute = { await hold.wait() }
+        env.orchestrator.runTarget = { _, _, _ in
+            ran = true
+            return "should not run"
+        }
+
+        let task = Task {
+            try await env.orchestrator.handoff(from: env.ada.id, to: env.lin.id, brief: "do it")
+        }
+        let started = await waitUntil(timeout: 2) { env.records().count == 1 }
+        XCTAssertTrue(started)
+
+        env.orchestrator.failInvolving(env.lin.id)
+        await hold.open()
+        do {
+            _ = try await task.value
+            XCTFail("interrupt should throw")
+        } catch {
+            XCTAssertEqual(error as? HandoffError, .interrupted)
+        }
+        XCTAssertFalse(ran)
+        XCTAssertEqual(env.records().first?.status, "failed")
+        XCTAssertTrue(env.orchestrator.inFlightRecords().isEmpty)
+    }
+
+    func testFailAllClearsWaiterlessPending() async throws {
+        let env = try HandoffTestEnv()
+        let stale = HandoffRecord(
+            fromAgentId: env.ada.id,
+            toAgentId: env.lin.id,
+            brief: "old",
+            status: "pending"
+        )
+        env.context.insert(stale)
+        try env.context.save()
+
+        do {
+            _ = try await env.orchestrator.handoff(from: env.ada.id, to: env.qa.id, brief: "blocked")
+            XCTFail("stale pending should block outbound")
+        } catch {
+            XCTAssertEqual(error as? HandoffError, .alreadyPending)
+        }
+
+        env.orchestrator.failAll()
+        XCTAssertEqual(stale.status, "failed")
+        XCTAssertTrue(env.orchestrator.inFlightRecords().isEmpty)
+
+        env.orchestrator.runTarget = { _, _, _ in "ok" }
+        let summary = try await env.orchestrator.handoff(from: env.ada.id, to: env.qa.id, brief: "new")
+        XCTAssertEqual(summary, "ok")
+        XCTAssertEqual(env.records().filter { $0.status == "done" }.count, 1)
+    }
+
+    func testInboundAlreadyInFlightRejected() async throws {
+        let env = try HandoffTestEnv()
+        let gate = AsyncGate()
+        env.orchestrator.runTarget = { _, _, _ in
+            await gate.wait()
+            return "ok"
+        }
+        let first = Task {
+            try await env.orchestrator.handoff(from: env.ada.id, to: env.lin.id, brief: "one")
+        }
+        let started = await waitUntil(timeout: 2) { env.orchestrator.inFlightRecords().count == 1 }
+        XCTAssertTrue(started)
+
+        do {
+            _ = try await env.orchestrator.handoff(from: env.qa.id, to: env.lin.id, brief: "two")
+            XCTFail("second inbound should throw")
+        } catch {
+            XCTAssertEqual(error as? HandoffError, .alreadyPending)
+        }
+        XCTAssertEqual(env.records().count, 1)
+        await gate.open()
+        _ = try await first.value
+    }
+
     func testUnknownAgentCreatesNoRecord() async throws {
         let env = try HandoffTestEnv()
         do {

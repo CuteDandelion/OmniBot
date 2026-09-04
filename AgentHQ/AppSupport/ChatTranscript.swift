@@ -91,6 +91,21 @@ enum ChatTranscript {
         }
     }
 
+    static func mergePreservingHandoffs(existing: [ChatItem], incoming: [ChatItem]) -> [ChatItem] {
+        var result = incoming
+        for item in existing where isHandoff(item) {
+            if !result.contains(where: { $0.id == item.id }) {
+                insertBeforeWorking(item, on: &result)
+            }
+        }
+        return result
+    }
+
+    private static func isHandoff(_ item: ChatItem) -> Bool {
+        if case .handoff = item.kind { return true }
+        return false
+    }
+
     static func ingest(_ incoming: [ChatItem], into items: inout [ChatItem]) {
         for item in incoming {
             if let index = items.firstIndex(where: { $0.id == item.id }) {

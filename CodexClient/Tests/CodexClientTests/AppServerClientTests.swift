@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import CodexClient
 
@@ -158,6 +159,27 @@ final class AppServerClientTests: XCTestCase {
         let resumed = try await client.threadResume(threadId: "thread-1")
         XCTAssertEqual(resumed.turns.first?.id, "turn-resume")
         try await client.turnInterrupt(threadId: resumed.id)
+    }
+
+    func testStopTerminatesProcessAndSuppressesTerminationCallback() async throws {
+        final class Flag: @unchecked Sendable {
+            var terminated = false
+        }
+        let client = makeClient()
+        let flag = Flag()
+        client.onTermination = { flag.terminated = true }
+        try await client.start()
+        XCTAssertTrue(client.isRunning)
+        let pid = try XCTUnwrap(client.processIdentifier)
+        client.stop()
+        XCTAssertFalse(client.isRunning)
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, kill(pid, 0) == 0 {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertNotEqual(kill(pid, 0), 0, "child still running after stop()")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(flag.terminated)
     }
 
     func testTurnInterruptWithoutCachedTurnFails() async throws {

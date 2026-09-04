@@ -180,6 +180,7 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertEqual(ApprovalDecision.accept.rawValue, "accept")
         XCTAssertEqual(ApprovalDecision.acceptForSession.rawValue, "acceptForSession")
         XCTAssertEqual(ApprovalDecision.decline.rawValue, "decline")
+        XCTAssertEqual(ApprovalDecision.cancel.rawValue, "cancel")
 
         let env = try ChatFakeEnv(approvalCount: 3)
         defer { env.session.shutdown() }
@@ -242,6 +243,33 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertEqual(env.session.pendingApproval?.command, "ls /etc")
         XCTAssertEqual(env.session.mascotState(for: env.agent.id), .needsApproval)
         XCTAssertEqual(env.session.mascotState(for: other.id), .idle)
+    }
+
+    func testInterruptCancelsPendingApprovals() async throws {
+        let env = try ChatFakeEnv(approvalCount: 2)
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        await env.session.send("run a command outside the workspace", from: env.agent)
+
+        let shown = await waitUntil(timeout: 2) {
+            env.session.pendingApproval?.command == "ls /etc"
+        }
+        XCTAssertTrue(shown, "expected approval before Stop: \(String(describing: env.session.pendingApproval))")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        await env.session.interruptTurn(for: env.agent)
+        XCTAssertNil(env.session.pendingApproval)
+        XCTAssertFalse(env.session.isTurnActive(for: env.agent.id))
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .idle)
+
+        let logged = await waitUntil(timeout: 2) { !env.loggedDecisions().isEmpty }
+        XCTAssertTrue(logged, "expected cancel responses: \(env.loggedDecisions())")
+        XCTAssertTrue(
+            env.loggedDecisions().allSatisfy { $0.decision == "cancel" },
+            "expected only cancel: \(env.loggedDecisions())"
+        )
+        XCTAssertGreaterThanOrEqual(env.loggedDecisions().count, 1)
     }
 }
 

@@ -77,10 +77,13 @@ struct ApprovalSheet: View {
                 .accessibilityIdentifier("approval-allow")
             }
             .font(Tokens.body)
+            .disabled(session.isRespondingToApproval)
+            .id(pending.requestId)
         }
         .padding(20)
         .frame(minWidth: 420, idealWidth: 420)
         .background(Tokens.subtle)
         .accessibilityIdentifier("approval-sheet")
+        .id(pending.requestId)
     }
 }

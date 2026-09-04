@@ -66,15 +66,69 @@ final class AgentModelTests: XCTestCase {
             mascot: .fox,
             customRoleTitle: "Researcher"
         )
+        XCTAssertEqual(custom.resolvedDeveloperInstructions, "")
         custom.customInstructions = "  Review papers.  "
         XCTAssertEqual(custom.resolvedDeveloperInstructions, "Review papers.")
+    }
+
+    func testChiefOfStaffSeedEqualsPresetInstructions() throws {
+        let seed = Agent.seededInstructions(for: .chiefOfStaff)
+        XCTAssertEqual(seed, RolePreset.chiefOfStaff.developerInstructions)
+
+        let agent = try makeAgent(
+            name: "Ada",
+            role: .chiefOfStaff,
+            mascot: .bear,
+            customInstructions: seed
+        )
+        XCTAssertEqual(agent.customInstructions, RolePreset.chiefOfStaff.developerInstructions)
+        XCTAssertEqual(agent.resolvedDeveloperInstructions, RolePreset.chiefOfStaff.developerInstructions)
+    }
+
+    func testUserOverrideIsResolvedDeveloperInstructions() throws {
+        let agent = try makeAgent(
+            name: "Ada",
+            role: .chiefOfStaff,
+            mascot: .bear,
+            customInstructions: RolePreset.chiefOfStaff.developerInstructions
+        )
+        agent.customInstructions = "  Coordinate only. Never write code.  "
+        XCTAssertEqual(agent.resolvedDeveloperInstructions, "Coordinate only. Never write code.")
+        XCTAssertNotEqual(agent.resolvedDeveloperInstructions, RolePreset.chiefOfStaff.developerInstructions)
+    }
+
+    func testSeededInstructionsUsesOverrideWhenPresent() {
+        XCTAssertEqual(
+            Agent.seededInstructions(for: .softwareEngineer, override: "  Ship it.  "),
+            "Ship it."
+        )
+        XCTAssertEqual(
+            Agent.seededInstructions(for: .qaEngineer, override: "   "),
+            RolePreset.qaEngineer.developerInstructions
+        )
+        XCTAssertEqual(Agent.seededInstructions(for: .custom), "")
+        XCTAssertEqual(Agent.seededInstructions(for: .custom, override: "  "), "")
+        XCTAssertEqual(Agent.seededInstructions(for: .custom, override: "Be a critic."), "Be a critic.")
+        XCTAssertNotEqual(Agent.seededInstructions(for: .custom), RolePreset.custom.developerInstructions)
+    }
+
+    func testStatusPipColors() {
+        XCTAssertEqual(MascotState.idle.statusLabel, "idle")
+        XCTAssertEqual(MascotState.working.statusLabel, "working")
+        XCTAssertEqual(MascotState.waiting.statusLabel, "waiting")
+        XCTAssertEqual(MascotState.needsApproval.statusLabel, "needs approval")
+        XCTAssertEqual(MascotState.idle.pipColor, Tokens.muted)
+        XCTAssertEqual(MascotState.working.pipColor, Tokens.accent)
+        XCTAssertEqual(MascotState.waiting.pipColor, Tokens.attention)
+        XCTAssertEqual(MascotState.needsApproval.pipColor, Tokens.danger)
     }
 
     private func makeAgent(
         name: String,
         role: RolePreset,
         mascot: MascotKind,
-        customRoleTitle: String? = nil
+        customRoleTitle: String? = nil,
+        customInstructions: String? = nil
     ) throws -> Agent {
         let schema = Schema([Agent.self, HandoffRecord.self])
         let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
@@ -84,6 +138,7 @@ final class AgentModelTests: XCTestCase {
             name: name,
             role: role,
             customRoleTitle: customRoleTitle,
+            customInstructions: customInstructions,
             mascot: mascot,
             workspacePath: "/tmp"
         )

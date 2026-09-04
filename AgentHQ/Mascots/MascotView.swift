@@ -106,7 +106,7 @@ struct MascotView: View {
 
     private func statusPip(for state: MascotState) -> some View {
         Circle()
-            .fill(pipColor(for: state))
+            .fill(state.pipColor)
             .frame(width: max(6, size * 0.18), height: max(6, size * 0.18))
             .overlay(
                 Circle()
@@ -114,15 +114,6 @@ struct MascotView: View {
             )
             .offset(x: 1, y: 1)
             .accessibilityHidden(true)
-    }
-
-    private func pipColor(for state: MascotState) -> Color {
-        switch state {
-        case .idle, .hover: return Tokens.muted
-        case .working: return Tokens.accent
-        case .waiting: return Tokens.attention
-        case .needsApproval: return Tokens.danger
-        }
     }
 }
 

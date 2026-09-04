@@ -19,10 +19,15 @@ final class Agent {
         role == .custom ? (customRoleTitle ?? "Custom") : role.defaultTitle
     }
 
+    /// Stored system/role message. Custom with no override stays empty so we omit `developerInstructions`.
     var resolvedDeveloperInstructions: String {
-        if role == .custom {
-            return (customInstructions ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+        Self.seededInstructions(for: role, override: customInstructions)
+    }
+
+    static func seededInstructions(for role: RolePreset, override: String? = nil) -> String {
+        let trimmed = (override ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { return trimmed }
+        if role == .custom { return "" }
         return role.developerInstructions
     }
 

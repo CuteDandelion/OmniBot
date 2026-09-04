@@ -37,4 +37,6 @@ enum Tokens {
     static let fg = Color(lightHex: "#1f2328", darkHex: "#e6edf3")
     static let muted = Color(lightHex: "#656d76", darkHex: "#8b949e")
     static let accent = Color(lightHex: "#0969da", darkHex: "#2f81f7")
+    static let danger = Color(lightHex: "#cf222e", darkHex: "#f85149")
+    static let attention = Color(lightHex: "#9a6700", darkHex: "#d29922")
 }

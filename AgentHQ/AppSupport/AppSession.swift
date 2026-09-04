@@ -121,6 +121,9 @@ final class AppSession: ObservableObject {
     private var hydratedAgents: Set<UUID> = []
     private var selectedAgentID: UUID?
     private var selectGeneration = 0
+    private var startingTurnAgentIDs: Set<UUID> = []
+    private var pendingInterruptAgentIDs: Set<UUID> = []
+    private var interruptedAgentIDs: Set<UUID> = []
 
     var showsSetupEmptyState: Bool {
         switch connectionState {
@@ -224,12 +227,17 @@ final class AppSession: ObservableObject {
     func send(_ text: String, from agent: Agent) async {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let threadId = agent.threadId, let client, !trimmed.isEmpty else { return }
+        guard !activeTurnAgentIDs.contains(agent.id) else { return }
+
+        interruptedAgentIDs.remove(agent.id)
+        pendingInterruptAgentIDs.remove(agent.id)
 
         var current = itemsByAgent[agent.id] ?? []
         current.append(ChatItem(id: "local-\(UUID().uuidString)", kind: .user(trimmed)))
         ChatTranscript.setWorking(detail: nil, on: &current)
         store(current, for: agent.id)
         activeTurnAgentIDs.insert(agent.id)
+        startingTurnAgentIDs.insert(agent.id)
 
         do {
             _ = try await client.turnStart(
@@ -240,33 +248,33 @@ final class AppSession: ObservableObject {
                     effort: agent.reasoningEffort.isEmpty ? nil : agent.reasoningEffort
                 )
             )
+            startingTurnAgentIDs.remove(agent.id)
+            if pendingInterruptAgentIDs.contains(agent.id) {
+                pendingInterruptAgentIDs.remove(agent.id)
+                await performInterrupt(for: agent, threadId: threadId)
+            }
         } catch {
-            var failed = itemsByAgent[agent.id] ?? current
-            ChatTranscript.removeWorking(from: &failed)
-            store(failed, for: agent.id)
-            activeTurnAgentIDs.remove(agent.id)
+            startingTurnAgentIDs.remove(agent.id)
+            pendingInterruptAgentIDs.remove(agent.id)
+            finishTurn(agent.id)
             banner = error.localizedDescription
         }
     }
 
     func interruptTurn(for agent: Agent) async {
         guard let threadId = agent.threadId else { return }
-        do {
-            try await client?.turnInterrupt(threadId: threadId)
-        } catch {
-            if case AppServerClientError.unknownTurn = error {
-                finishTurn(agent.id)
-                return
-            }
-            banner = error.localizedDescription
+        if startingTurnAgentIDs.contains(agent.id) {
+            pendingInterruptAgentIDs.insert(agent.id)
+            return
         }
-        finishTurn(agent.id)
+        guard activeTurnAgentIDs.contains(agent.id) else { return }
+        await performInterrupt(for: agent, threadId: threadId)
     }
 
     func changeWorkspace(for agent: Agent, to path: String) async {
         let oldThreadId = agent.threadId
-        if let oldThreadId, activeTurnAgentIDs.contains(agent.id) {
-            try? await client?.turnInterrupt(threadId: oldThreadId)
+        if activeTurnAgentIDs.contains(agent.id) {
+            await interruptTurn(for: agent)
         }
         if let oldThreadId {
             try? await client?.threadArchive(threadId: oldThreadId)
@@ -358,7 +366,11 @@ final class AppSession: ObservableObject {
         old?.onTermination = nil
         old?.stop()
         activeTurnAgentIDs = []
+        startingTurnAgentIDs = []
+        pendingInterruptAgentIDs = []
+        interruptedAgentIDs = []
         pendingApproval = nil
+        clearWorkingRows()
     }
 
     private func observeTermination(
@@ -474,11 +486,15 @@ final class AppSession: ObservableObject {
         }
 
         guard let threadId = eventThreadId(event), let agentID = agentIDByThread[threadId] else { return }
+        if interruptedAgentIDs.contains(agentID) {
+            guard case .turnCompleted = event else { return }
+        }
         var current = itemsByAgent[agentID] ?? []
         let finished = ChatTranscript.apply(event, threadId: threadId, to: &current)
         store(current, for: agentID)
         if finished {
-            activeTurnAgentIDs.remove(agentID)
+            finishTurn(agentID)
+            interruptedAgentIDs.remove(agentID)
             if pendingApproval?.threadId == threadId {
                 pendingApproval = nil
             }
@@ -560,11 +576,45 @@ final class AppSession: ObservableObject {
         writeEvidence()
     }
 
+    private func performInterrupt(for agent: Agent, threadId: String) async {
+        interruptedAgentIDs.insert(agent.id)
+        do {
+            try await client?.turnInterrupt(threadId: threadId)
+        } catch {
+            if case AppServerClientError.unknownTurn = error {
+                if startingTurnAgentIDs.contains(agent.id) {
+                    pendingInterruptAgentIDs.insert(agent.id)
+                    interruptedAgentIDs.remove(agent.id)
+                    return
+                }
+                finishTurn(agent.id)
+                return
+            }
+            interruptedAgentIDs.remove(agent.id)
+            banner = error.localizedDescription
+            return
+        }
+        finishTurn(agent.id)
+    }
+
     private func finishTurn(_ agentID: UUID) {
         var current = itemsByAgent[agentID] ?? []
         ChatTranscript.removeWorking(from: &current)
         store(current, for: agentID)
         activeTurnAgentIDs.remove(agentID)
+        startingTurnAgentIDs.remove(agentID)
+        pendingInterruptAgentIDs.remove(agentID)
+    }
+
+    private func clearWorkingRows() {
+        for id in itemsByAgent.keys {
+            var current = itemsByAgent[id] ?? []
+            ChatTranscript.removeWorking(from: &current)
+            itemsByAgent[id] = current
+        }
+        var current = items
+        ChatTranscript.removeWorking(from: &current)
+        items = current
     }
 
     private func workspaceExists(_ path: String) -> Bool {

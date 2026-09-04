@@ -63,6 +63,53 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertNil(env.session.items.workingDetail)
         XCTAssertEqual(env.session.mascotState(for: env.agent.id), .idle)
         XCTAssertNotNil(try env.loggedRequest(method: "turn/interrupt"))
+        XCTAssertEqual(try env.loggedRequest(method: "turn/interrupt")["turnId"] as? String, "turn-1")
+    }
+
+    func testStopDuringInFlightTurnStartInterruptsAfterStart() async throws {
+        let env = try ChatFakeEnv(turnDelayMS: 400)
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        let sendTask = Task { await env.session.send("hi", from: env.agent) }
+        let becameActive = await waitUntil(timeout: 2) {
+            env.session.isTurnActive(for: env.agent.id)
+        }
+        XCTAssertTrue(becameActive, "send should mark the turn active before turn/start returns")
+        XCTAssertTrue(env.session.items.contains { if case .working = $0.kind { return true }; return false })
+
+        await env.session.interruptTurn(for: env.agent)
+        XCTAssertTrue(env.session.isTurnActive(for: env.agent.id))
+        XCTAssertNil(try? env.loggedRequest(method: "turn/interrupt"))
+
+        await sendTask.value
+        let interrupt = try env.loggedRequest(method: "turn/interrupt")
+        XCTAssertEqual(interrupt["turnId"] as? String, "turn-1")
+        XCTAssertEqual(interrupt["threadId"] as? String, "thread-1")
+        XCTAssertFalse(env.session.isTurnActive(for: env.agent.id))
+        XCTAssertNil(env.session.items.workingDetail)
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .idle)
+    }
+
+    func testDiscardClientClearsWorkingRow() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        await env.session.send("hi", from: env.agent)
+        XCTAssertTrue(env.session.isTurnActive(for: env.agent.id))
+        XCTAssertTrue(env.session.items.contains { if case .working = $0.kind { return true }; return false })
+
+        env.session.shutdown()
+        XCTAssertFalse(env.session.isTurnActive(for: env.agent.id))
+        XCTAssertNil(env.session.items.workingDetail)
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .idle)
+
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        XCTAssertNil(env.session.items.workingDetail)
+        XCTAssertFalse(env.session.isTurnActive(for: env.agent.id))
     }
 
     func testEventFanOutReachesMultipleSubscribers() async throws {
@@ -155,7 +202,7 @@ private struct ChatFakeEnv {
     let logURL: URL
     private let context: ModelContext
 
-    init(threadId: String? = nil) throws {
+    init(threadId: String? = nil, turnDelayMS: Int = 0) throws {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-ws-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         let logURL = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-fake-\(UUID().uuidString).jsonl")
@@ -184,7 +231,11 @@ private struct ChatFakeEnv {
         self.session = AppSession(
             resolveExecutable: { script },
             makeClient: { url in
-                AppServerClient(executableURL: url, extraConfig: ["AGENTHQ_FAKE_LOG": logURL.path])
+                var extra = ["AGENTHQ_FAKE_LOG": logURL.path]
+                if turnDelayMS > 0 {
+                    extra["AGENTHQ_FAKE_TURN_DELAY_MS"] = String(turnDelayMS)
+                }
+                return AppServerClient(executableURL: url, extraConfig: extra)
             }
         )
     }
@@ -216,12 +267,18 @@ private struct ChatFakeEnv {
 
 private let script = #"""
 #!/usr/bin/env python3
-import json, sys
+import json, sys, time
 
 LOG = None
+DELAY_MS = 0
 for index, arg in enumerate(sys.argv):
-    if arg == "-c" and index + 1 < len(sys.argv) and sys.argv[index + 1].startswith("AGENTHQ_FAKE_LOG="):
-        LOG = sys.argv[index + 1].split("=", 1)[1]
+    if arg != "-c" or index + 1 >= len(sys.argv):
+        continue
+    value = sys.argv[index + 1]
+    if value.startswith("AGENTHQ_FAKE_LOG="):
+        LOG = value.split("=", 1)[1]
+    elif value.startswith("AGENTHQ_FAKE_TURN_DELAY_MS="):
+        DELAY_MS = int(value.split("=", 1)[1])
 STARTS = 0
 
 MODEL = {
@@ -288,6 +345,8 @@ def handle(msg):
         send({"id": mid, "result": {}})
         return
     if method == "turn/start":
+        if DELAY_MS:
+            time.sleep(DELAY_MS / 1000.0)
         tid = params.get("threadId") or "thread-1"
         send({"id": mid, "result": {"turn": {"id": "turn-1", "items": [], "status": "inProgress"}}})
         send({"method": "item/started", "params": {

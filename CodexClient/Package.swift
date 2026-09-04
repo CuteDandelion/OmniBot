@@ -11,5 +11,10 @@ let package = Package(
     ],
     targets: [
         .target(name: "CodexClient"),
+        .testTarget(
+            name: "CodexClientTests",
+            dependencies: ["CodexClient"],
+            exclude: ["FakeAppServer.py"]
+        ),
     ]
 )

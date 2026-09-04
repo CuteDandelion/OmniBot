@@ -91,6 +91,15 @@ struct AgentHQRootView: View {
         }
         .background(Tokens.canvas)
         .task { await session.start() }
+        .sheet(isPresented: Binding(
+            get: { session.pendingApproval != nil },
+            set: { _ in }
+        )) {
+            ApprovalSheet()
+                .environmentObject(session)
+                .environment(\.modelContext, modelContext)
+                .interactiveDismissDisabled()
+        }
         .onAppear {
             #if DEBUG
             DebugSmoke.runIfNeeded(modelContext: modelContext, selectedAgentID: $selectedAgentID)

@@ -102,6 +102,9 @@ final class AppSession: ObservableObject {
     @Published private(set) var activeTurnAgentIDs: Set<UUID> = []
     @Published private(set) var workspaceWarning: String?
     @Published private(set) var pendingApproval: PendingApproval?
+    @Published private(set) var isRespondingToApproval = false
+    @Published private var approvalQueue: [PendingApproval] = []
+    private var inFlightApprovalRequestID: JSONRPCID?
 
     static let clientInfo = ClientInfo(name: "agent_hq", title: "Agent HQ", version: "0.1.0")
 
@@ -146,6 +149,7 @@ final class AppSession: ObservableObject {
 
     func mascotState(for agentID: UUID) -> MascotState {
         if pendingApproval?.agentID == agentID { return .needsApproval }
+        if approvalQueue.contains(where: { $0.agentID == agentID }) { return .needsApproval }
         if activeTurnAgentIDs.contains(agentID) { return .working }
         return .idle
     }
@@ -292,13 +296,21 @@ final class AppSession: ObservableObject {
     }
 
     func respondToPendingApproval(_ decision: ApprovalDecision) async {
-        guard let pending = pendingApproval else { return }
-        pendingApproval = nil
+        guard !isRespondingToApproval, let pending = pendingApproval else { return }
+        isRespondingToApproval = true
+        inFlightApprovalRequestID = pending.requestId
+        defer {
+            inFlightApprovalRequestID = nil
+            isRespondingToApproval = false
+        }
         do {
             try await client?.respondApproval(requestId: pending.requestId, decision: decision)
         } catch {
             banner = error.localizedDescription
+            return
         }
+        guard pendingApproval?.requestId == pending.requestId else { return }
+        pendingApproval = approvalQueue.isEmpty ? nil : approvalQueue.removeFirst()
     }
 
     private func connect(generation: Int, allowReconnect: Bool) async {
@@ -370,6 +382,9 @@ final class AppSession: ObservableObject {
         pendingInterruptAgentIDs = []
         interruptedAgentIDs = []
         pendingApproval = nil
+        approvalQueue = []
+        inFlightApprovalRequestID = nil
+        isRespondingToApproval = false
         clearWorkingRows()
     }
 
@@ -456,22 +471,23 @@ final class AppSession: ObservableObject {
         }
     }
 
-    private func handleEvent(_ event: ServerEvent) {
+    private func handleEvent(_ event: ServerEvent) async {
         broadcast(event)
 
         switch event {
         case .commandExecutionApproval(let requestId, let params):
-            pendingApproval = PendingApproval(
+            let approval = PendingApproval(
                 requestId: requestId,
                 threadId: params.threadId,
                 agentID: agentIDByThread[params.threadId],
                 command: params.command ?? "command",
                 reason: params.reason
             )
+            await ingestApproval(approval)
         case .request(let requestId, let method, let params):
             if method.contains("requestApproval") || method.contains("requestUserInput") {
                 let threadId = params?.object?["threadId"]?.string ?? ""
-                pendingApproval = PendingApproval(
+                let approval = PendingApproval(
                     requestId: requestId,
                     threadId: threadId,
                     agentID: agentIDByThread[threadId],
@@ -480,6 +496,7 @@ final class AppSession: ObservableObject {
                         ?? method,
                     reason: params?.object?["reason"]?.string
                 )
+                await ingestApproval(approval)
             }
         default:
             break
@@ -495,10 +512,75 @@ final class AppSession: ObservableObject {
         if finished {
             finishTurn(agentID)
             interruptedAgentIDs.remove(agentID)
-            if pendingApproval?.threadId == threadId {
-                pendingApproval = nil
+            await respondAndDropApprovals(for: threadId, decision: .decline)
+        }
+    }
+
+    private func ingestApproval(_ approval: PendingApproval) async {
+        if let agentID = approval.agentID, interruptedAgentIDs.contains(agentID) {
+            await respondToApprovals([approval], decision: .cancel)
+            return
+        }
+        enqueueApproval(approval)
+    }
+
+    private func enqueueApproval(_ approval: PendingApproval) {
+        if pendingApproval?.requestId == approval.requestId { return }
+        if approvalQueue.contains(where: { $0.requestId == approval.requestId }) { return }
+        if pendingApproval == nil {
+            pendingApproval = approval
+        } else {
+            approvalQueue.append(approval)
+        }
+    }
+
+    private func takeApprovals(for threadId: String) -> [PendingApproval] {
+        var taken: [PendingApproval] = []
+        var remaining: [PendingApproval] = []
+        let skip = inFlightApprovalRequestID
+        func consider(_ item: PendingApproval) {
+            if item.threadId != threadId {
+                remaining.append(item)
+            } else if let skip, item.requestId == skip {
+                return
+            } else {
+                taken.append(item)
             }
         }
+        if let pending = pendingApproval {
+            consider(pending)
+        }
+        for item in approvalQueue {
+            consider(item)
+        }
+        pendingApproval = remaining.first
+        approvalQueue = Array(remaining.dropFirst())
+        return taken
+    }
+
+    private func requeueApprovals(_ approvals: [PendingApproval]) {
+        guard !approvals.isEmpty else { return }
+        if pendingApproval == nil {
+            pendingApproval = approvals[0]
+            approvalQueue.insert(contentsOf: approvals.dropFirst(), at: 0)
+        } else {
+            approvalQueue.insert(contentsOf: approvals, at: 0)
+        }
+    }
+
+    private func respondToApprovals(_ approvals: [PendingApproval], decision: ApprovalDecision) async {
+        for approval in approvals {
+            do {
+                try await client?.respondApproval(requestId: approval.requestId, decision: decision)
+            } catch {
+                banner = error.localizedDescription
+            }
+        }
+    }
+
+    private func respondAndDropApprovals(for threadId: String, decision: ApprovalDecision) async {
+        let taken = takeApprovals(for: threadId)
+        await respondToApprovals(taken, decision: decision)
     }
 
     private func broadcast(_ event: ServerEvent) {
@@ -578,6 +660,7 @@ final class AppSession: ObservableObject {
 
     private func performInterrupt(for agent: Agent, threadId: String) async {
         interruptedAgentIDs.insert(agent.id)
+        let dropped = takeApprovals(for: threadId)
         do {
             try await client?.turnInterrupt(threadId: threadId)
         } catch {
@@ -585,15 +668,19 @@ final class AppSession: ObservableObject {
                 if startingTurnAgentIDs.contains(agent.id) {
                     pendingInterruptAgentIDs.insert(agent.id)
                     interruptedAgentIDs.remove(agent.id)
+                    requeueApprovals(dropped)
                     return
                 }
+                await respondToApprovals(dropped, decision: .cancel)
                 finishTurn(agent.id)
                 return
             }
             interruptedAgentIDs.remove(agent.id)
+            requeueApprovals(dropped)
             banner = error.localizedDescription
             return
         }
+        await respondToApprovals(dropped, decision: .cancel)
         finishTurn(agent.id)
     }
 

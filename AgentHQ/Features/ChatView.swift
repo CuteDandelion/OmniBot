@@ -1,4 +1,3 @@
-import CodexClient
 import SwiftData
 import SwiftUI
 
@@ -34,33 +33,6 @@ struct ChatView: View {
         .accessibilityIdentifier(identifier)
     }
 
-    private func approvalBanner(_ pending: PendingApproval) -> some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text("Approval needed: \(pending.command)")
-                .font(Tokens.caption)
-                .foregroundStyle(Tokens.attention)
-                .lineLimit(2)
-            Spacer(minLength: 8)
-            Button("Allow") {
-                Task { await session.respondToPendingApproval(.accept) }
-            }
-            .font(Tokens.caption)
-            .accessibilityIdentifier("approval-allow")
-            Button("Deny") {
-                Task { await session.respondToPendingApproval(.decline) }
-            }
-            .font(Tokens.caption)
-            .accessibilityIdentifier("approval-deny")
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Tokens.subtle)
-        .overlay(alignment: .bottom) {
-            Tokens.border.frame(height: 1)
-        }
-        .accessibilityIdentifier("approval-placeholder")
-    }
-
     var body: some View {
         if session.showsSetupEmptyState {
             EmptyStateView()
@@ -72,9 +44,6 @@ struct ChatView: View {
                         .overlay(Tokens.border)
                     if let warning = session.workspaceWarning {
                         chatBanner(warning, identifier: "workspace-missing-banner")
-                    }
-                    if let pending = session.pendingApproval {
-                        approvalBanner(pending)
                     }
                     TranscriptView(items: session.items)
                     Divider()

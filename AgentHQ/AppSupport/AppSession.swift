@@ -88,24 +88,34 @@ enum CodexErrorClassifier {
 final class AppSession: ObservableObject {
     @Published private(set) var connectionState: CodexConnectionState = .idle
     @Published private(set) var models: [ModelInfo] = []
+    @Published private(set) var resolvedExecutablePath: String?
     @Published var banner: String?
 
     static let clientInfo = ClientInfo(name: "agent_hq", title: "Agent HQ", version: "0.1.0")
 
     private var client: AppServerClient?
+    private var lastStoppedPid: Int32?
     private var generation = 0
     private var reconnectUsed = false
     private var didStart = false
+    private var didConnectOnce = false
+    private var didForceRetry = false
     private let resolveExecutable: () -> URL?
     private let makeClient: (URL) -> AppServerClient
 
     var showsSetupEmptyState: Bool {
         switch connectionState {
-        case .missingBinary, .notSignedIn, .connecting, .idle:
+        case .missingBinary, .notSignedIn:
             return true
+        case .connecting, .idle:
+            return !didConnectOnce
         case .ready, .disconnected:
             return false
         }
+    }
+
+    var isReconnecting: Bool {
+        connectionState == .connecting && didConnectOnce
     }
 
     init(
@@ -141,41 +151,88 @@ final class AppSession: ObservableObject {
 
     private func connect(generation: Int, allowReconnect: Bool) async {
         guard generation == self.generation else { return }
-        client = nil
+        discardClient()
         connectionState = .connecting
         writeEvidence()
 
         guard let executable = resolveExecutable() else {
+            resolvedExecutablePath = nil
             connectionState = .missingBinary
             models = []
             writeEvidence()
             return
         }
+        resolvedExecutablePath = executable.path
 
         let client = makeClient(executable)
         self.client = client
         do {
             try await client.start()
-            guard generation == self.generation else { return }
+            guard generation == self.generation else {
+                client.stop()
+                return
+            }
             try await client.initialize(clientInfo: Self.clientInfo)
-            guard generation == self.generation else { return }
+            guard generation == self.generation else {
+                client.stop()
+                return
+            }
             try await client.initialized()
-            guard generation == self.generation else { return }
+            guard generation == self.generation else {
+                client.stop()
+                return
+            }
             let catalog = try await client.listModels()
-            guard generation == self.generation else { return }
+            guard generation == self.generation else {
+                client.stop()
+                return
+            }
             models = catalog
             connectionState = .ready
+            didConnectOnce = true
             banner = nil
+            observeTermination(of: client, generation: generation, allowReconnect: allowReconnect)
             writeEvidence()
-            Task { await watch(client: client, generation: generation, allowReconnect: allowReconnect) }
+            maybeForceRetryForEvidence()
         } catch {
-            guard generation == self.generation else { return }
+            guard generation == self.generation else {
+                client.stop()
+                return
+            }
             await handleFailure(error, generation: generation, allowReconnect: allowReconnect)
         }
     }
 
-    private func watch(client: AppServerClient, generation: Int, allowReconnect: Bool) async {
-        for await _ in client.events {}
+    private func discardClient() {
+        let old = client
+        lastStoppedPid = old?.processIdentifier
+        client = nil
+        old?.onTermination = nil
+        old?.stop()
+    }
+
+    private func observeTermination(
+        of client: AppServerClient,
+        generation: Int,
+        allowReconnect: Bool
+    ) {
+        client.onTermination = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.handleUnexpectedExit(
+                    client: client,
+                    generation: generation,
+                    allowReconnect: allowReconnect
+                )
+            }
+        }
+    }
+
+    private func handleUnexpectedExit(
+        client: AppServerClient,
+        generation: Int,
+        allowReconnect: Bool
+    ) async {
         guard generation == self.generation else { return }
         guard self.client === client else { return }
         await handleCrash(generation: generation, allowReconnect: allowReconnect)
@@ -188,6 +245,7 @@ final class AppSession: ObservableObject {
             await connect(generation: generation, allowReconnect: false)
             return
         }
+        discardClient()
         connectionState = .disconnected
         banner = "Codex disconnected"
         writeEvidence()
@@ -199,6 +257,7 @@ final class AppSession: ObservableObject {
             connectionState = .notSignedIn
             writeEvidence()
         case .missingBinary:
+            discardClient()
             connectionState = .missingBinary
             models = []
             writeEvidence()
@@ -209,11 +268,19 @@ final class AppSession: ObservableObject {
                 reconnectUsed = true
                 await connect(generation: generation, allowReconnect: false)
             } else {
+                discardClient()
                 connectionState = .disconnected
                 banner = "Codex disconnected"
                 writeEvidence()
             }
         }
+    }
+
+    private func maybeForceRetryForEvidence() {
+        guard ProcessInfo.processInfo.environment["AGENTHQ_RETRY_AFTER_READY"] == "1" else { return }
+        guard !didForceRetry else { return }
+        didForceRetry = true
+        Task { await retry() }
     }
 
     private func writeEvidence() {
@@ -237,12 +304,20 @@ final class AppSession: ObservableObject {
             "state": describe(connectionState),
             "modelCount": models.count,
             "models": modelPayload,
+            "generation": generation,
+            "running": client?.isRunning ?? false,
         ]
         if let banner {
             payload["banner"] = banner
         }
-        if let path = resolveExecutable()?.path {
+        if let path = resolvedExecutablePath {
             payload["executable"] = path
+        }
+        if let pid = client?.processIdentifier {
+            payload["pid"] = pid
+        }
+        if let lastStoppedPid {
+            payload["lastStoppedPid"] = lastStoppedPid
         }
         if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: dir.appendingPathComponent("session.json"))

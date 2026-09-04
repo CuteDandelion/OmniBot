@@ -1,4 +1,5 @@
 import CodexClient
+import Darwin
 import XCTest
 @testable import AgentHQ
 
@@ -10,7 +11,9 @@ final class CodexProcessTests: XCTestCase {
         let resolved = CodexProcess.resolveExecutable(
             defaults: defaults,
             environment: ["PATH": "/nope"],
-            fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            extraSearchPaths: [],
+            loginPATH: { nil }
         )
         XCTAssertEqual(resolved?.path, fake.path)
     }
@@ -21,7 +24,9 @@ final class CodexProcessTests: XCTestCase {
         let resolved = CodexProcess.resolveExecutable(
             defaults: defaults,
             environment: ["PATH": "/usr/bin:/bin"],
-            fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            extraSearchPaths: [],
+            loginPATH: { nil }
         )
         XCTAssertNil(resolved)
     }
@@ -32,7 +37,35 @@ final class CodexProcessTests: XCTestCase {
         let resolved = CodexProcess.resolveExecutable(
             defaults: defaults,
             environment: ["PATH": fake.deletingLastPathComponent().path],
-            fileExists: { FileManager.default.isExecutableFile(atPath: $0) }
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            extraSearchPaths: [],
+            loginPATH: { nil }
+        )
+        XCTAssertEqual(resolved?.path, fake.path)
+    }
+
+    func testCommonInstallDirFallback() throws {
+        let fake = try makeExecutable("codex")
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let resolved = CodexProcess.resolveExecutable(
+            defaults: defaults,
+            environment: ["PATH": "/nope"],
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            extraSearchPaths: [fake.deletingLastPathComponent().path],
+            loginPATH: { nil }
+        )
+        XCTAssertEqual(resolved?.path, fake.path)
+    }
+
+    func testLoginShellPATHFallback() throws {
+        let fake = try makeExecutable("codex")
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let resolved = CodexProcess.resolveExecutable(
+            defaults: defaults,
+            environment: ["PATH": "/nope"],
+            fileExists: { FileManager.default.isExecutableFile(atPath: $0) },
+            extraSearchPaths: [],
+            loginPATH: { fake.deletingLastPathComponent().path }
         )
         XCTAssertEqual(resolved?.path, fake.path)
     }
@@ -83,6 +116,35 @@ final class CodexProcessTests: XCTestCase {
         XCTAssertEqual(session.connectionState, .idle)
     }
 
+    @MainActor
+    func testRetryStopsPreviousClient() async throws {
+        let script = try makeFakeAppServer()
+        var clients: [AppServerClient] = []
+        let session = AppSession(
+            resolveExecutable: { script },
+            makeClient: { url in
+                let client = AppServerClient(executableURL: url, extraConfig: [:])
+                clients.append(client)
+                return client
+            }
+        )
+        await session.retry()
+        XCTAssertEqual(session.connectionState, .ready)
+        XCTAssertFalse(session.showsSetupEmptyState)
+        XCTAssertEqual(clients.count, 1)
+        let first = try XCTUnwrap(clients.first)
+        let firstPID = try XCTUnwrap(first.processIdentifier)
+        XCTAssertTrue(first.isRunning)
+
+        await session.retry()
+        XCTAssertEqual(session.connectionState, .ready)
+        XCTAssertEqual(clients.count, 2)
+        XCTAssertFalse(first.isRunning)
+        XCTAssertTrue(clients[1].isRunning)
+        XCTAssertTrue(waitUntilExited(pid: firstPID), "previous app-server pid \(firstPID) still alive")
+        XCTAssertNotEqual(clients[1].processIdentifier, firstPID)
+    }
+
     private func makeExecutable(_ name: String) throws -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-codex-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -90,6 +152,56 @@ final class CodexProcessTests: XCTestCase {
         FileManager.default.createFile(atPath: url.path, contents: Data("#!/bin/sh\n".utf8), attributes: nil)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
         return url
+    }
+
+    private func makeFakeAppServer() throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-fake-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("fake-app-server.py")
+        let script = #"""
+        #!/usr/bin/env python3
+        import json, sys
+
+        def send(obj):
+            sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
+            sys.stdout.flush()
+
+        model = {
+            "id": "gpt-5.6",
+            "displayName": "GPT-5.6",
+            "defaultReasoningEffort": "medium",
+            "description": "d",
+            "hidden": False,
+            "isDefault": True,
+            "model": "gpt-5.6",
+            "supportedReasoningEfforts": [{"description": "Medium", "reasoningEffort": "medium"}],
+        }
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            msg = json.loads(line)
+            method = msg.get("method")
+            mid = msg.get("id")
+            if method == "initialize":
+                send({"id": mid, "result": {"userAgent": "codex-fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "macos"}})
+            elif method == "model/list":
+                send({"id": mid, "result": {"data": [model]}})
+            elif method == "initialized":
+                pass
+        """#
+        try script.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    private func waitUntilExited(pid: Int32, timeout: TimeInterval = 2) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 { return true }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return false
     }
 }
 

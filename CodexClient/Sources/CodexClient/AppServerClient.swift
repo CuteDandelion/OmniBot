@@ -21,11 +21,40 @@ public final class AppServerClient: @unchecked Sendable {
     private var readTask: Task<Void, Never>?
     private var isStarting = false
     private var didFinishEvents = false
+    private var stopped = false
+    private var terminationCallback: (@Sendable () -> Void)?
     private var pending: [JSONRPCID: CheckedContinuation<JSONValue, Error>] = [:]
     private var lastTurnIDByThread: [String: String] = [:]
     private let eventContinuation: AsyncStream<ServerEvent>.Continuation
 
     public let events: AsyncStream<ServerEvent>
+
+    /// Invoked once when the child exits unexpectedly. Not called after `stop()`.
+    public var onTermination: (@Sendable () -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return terminationCallback
+        }
+        set {
+            lock.lock()
+            terminationCallback = newValue
+            lock.unlock()
+        }
+    }
+
+    public var isRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return process?.isRunning == true
+    }
+
+    public var processIdentifier: Int32? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let process, process.isRunning else { return nil }
+        return process.processIdentifier
+    }
 
     public init(executableURL: URL, extraConfig: [String: String]) {
         self.executableURL = executableURL
@@ -47,6 +76,18 @@ public final class AppServerClient: @unchecked Sendable {
     }
 
     deinit {
+        lock.lock()
+        stopped = true
+        terminationCallback = nil
+        lock.unlock()
+        shutDown()
+    }
+
+    public func stop() {
+        lock.lock()
+        stopped = true
+        terminationCallback = nil
+        lock.unlock()
         shutDown()
     }
 
@@ -97,6 +138,7 @@ public final class AppServerClient: @unchecked Sendable {
             await self?.readLoop(handle: stdout)
         }
         isStarting = false
+        stopped = false
         lock.unlock()
     }
 
@@ -335,6 +377,14 @@ public final class AppServerClient: @unchecked Sendable {
     private func handleTermination(status: Int32) {
         failAllPending(AppServerClientError.processExited(status))
         finishEvents()
+        lock.lock()
+        let stopped = self.stopped
+        let callback = terminationCallback
+        terminationCallback = nil
+        lock.unlock()
+        if !stopped {
+            callback?()
+        }
     }
 
     private func currentExitStatus() -> Int32 {

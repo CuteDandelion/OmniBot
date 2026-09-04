@@ -15,6 +15,21 @@ struct SettingsView: View {
                 .font(Tokens.caption)
                 .foregroundStyle(Tokens.muted)
 
+            if path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if let resolved = session.resolvedExecutablePath {
+                    Text("Using \(resolved)")
+                        .font(Tokens.caption)
+                        .foregroundStyle(Tokens.muted)
+                        .textSelection(.enabled)
+                        .accessibilityIdentifier("codex-resolved-path")
+                } else if session.connectionState == .missingBinary {
+                    Text("Not found on PATH")
+                        .font(Tokens.caption)
+                        .foregroundStyle(Tokens.muted)
+                        .accessibilityIdentifier("codex-resolved-path")
+                }
+            }
+
             HStack(spacing: 8) {
                 styledField {
                     TextField("/usr/local/bin/codex", text: $path)
@@ -77,11 +92,15 @@ struct SettingsView: View {
 
     private func save() {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previous = UserDefaults.standard.string(forKey: CodexProcess.pathDefaultsKey) ?? ""
         path = trimmed
         if trimmed.isEmpty {
             UserDefaults.standard.removeObject(forKey: CodexProcess.pathDefaultsKey)
         } else {
             UserDefaults.standard.set(trimmed, forKey: CodexProcess.pathDefaultsKey)
+        }
+        if trimmed == previous && session.connectionState == .ready {
+            return
         }
         Task { await session.retry() }
     }

@@ -52,7 +52,7 @@ Each agent has a user-chosen vector mascot, independent of role. The role only s
 
 ### Edit the system message
 
-Every role has an editable system / role message (not only Custom). After create, click the text-align button in the header to edit it. Saving a change archives the current Codex thread and starts a new one so the new instructions take effect.
+Every role has an editable system / role message (not only Custom). Preset roles seed the field from their shipped instructions; Custom starts empty (the placeholder is only UI copy, not sent to Codex). After create, click the text-align button in the header to edit it. Saving a change archives the current Codex thread and starts a new one so the new instructions take effect.
 
 ### Delete an agent
 

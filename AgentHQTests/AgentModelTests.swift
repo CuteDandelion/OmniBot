@@ -66,6 +66,7 @@ final class AgentModelTests: XCTestCase {
             mascot: .fox,
             customRoleTitle: "Researcher"
         )
+        XCTAssertEqual(custom.resolvedDeveloperInstructions, "")
         custom.customInstructions = "  Review papers.  "
         XCTAssertEqual(custom.resolvedDeveloperInstructions, "Review papers.")
     }
@@ -105,6 +106,10 @@ final class AgentModelTests: XCTestCase {
             Agent.seededInstructions(for: .qaEngineer, override: "   "),
             RolePreset.qaEngineer.developerInstructions
         )
+        XCTAssertEqual(Agent.seededInstructions(for: .custom), "")
+        XCTAssertEqual(Agent.seededInstructions(for: .custom, override: "  "), "")
+        XCTAssertEqual(Agent.seededInstructions(for: .custom, override: "Be a critic."), "Be a critic.")
+        XCTAssertNotEqual(Agent.seededInstructions(for: .custom), RolePreset.custom.developerInstructions)
     }
 
     func testStatusPipColors() {

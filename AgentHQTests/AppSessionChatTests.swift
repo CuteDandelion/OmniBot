@@ -311,6 +311,19 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertEqual(start["developerInstructions"] as? String, "Only review PRs.")
     }
 
+    func testCustomEmptyOmitsDeveloperInstructions() async throws {
+        let env = try ChatFakeEnv()
+        defer { env.session.shutdown() }
+        env.agent.role = .custom
+        env.agent.customInstructions = nil
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        let start = try env.loggedRequest(method: "thread/start")
+        XCTAssertNil(start["developerInstructions"])
+        XCTAssertEqual(env.agent.resolvedDeveloperInstructions, "")
+    }
+
     func testUpdateDeveloperInstructionsArchivesAndStartsNewThread() async throws {
         let env = try ChatFakeEnv()
         defer { env.session.shutdown() }
@@ -363,6 +376,34 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertFalse(agents.contains { $0.id == deletedID })
         let records = try env.context.fetch(FetchDescriptor<HandoffRecord>())
         XCTAssertTrue(records.isEmpty)
+    }
+
+    func testDeleteDuringInFlightTurnStartInterrupts() async throws {
+        let env = try ChatFakeEnv(turnDelayMS: 400)
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        env.session.selectedAgentID = env.agent.id
+
+        let sendTask = Task { await env.session.send("hi", from: env.agent) }
+        let becameActive = await waitUntil(timeout: 2) {
+            env.session.isTurnActive(for: env.agent.id)
+        }
+        XCTAssertTrue(becameActive, "send should mark the turn active before turn/start returns")
+
+        let deletedID = env.agent.id
+        let threadId = env.agent.threadId
+        await env.session.deleteAgent(env.agent, in: env.context)
+        await sendTask.value
+
+        let interrupt = try env.loggedRequest(method: "turn/interrupt")
+        XCTAssertEqual(interrupt["turnId"] as? String, "turn-1")
+        XCTAssertEqual(interrupt["threadId"] as? String, threadId)
+        XCTAssertNotNil(try env.loggedRequest(method: "thread/archive"))
+        XCTAssertNil(env.session.selectedAgentID)
+        XCTAssertFalse(env.session.isTurnActive(for: deletedID))
+        let agents = try env.context.fetch(FetchDescriptor<Agent>())
+        XCTAssertFalse(agents.contains { $0.id == deletedID })
     }
 }
 

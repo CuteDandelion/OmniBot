@@ -369,6 +369,18 @@ final class AppSession: ObservableObject {
         await performInterrupt(for: agent, threadId: threadId)
     }
 
+    private func waitForTurnStartToObserveInterrupt(agentID: UUID) async {
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if !startingTurnAgentIDs.contains(agentID),
+               !pendingInterruptAgentIDs.contains(agentID),
+               !activeTurnAgentIDs.contains(agentID) {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     func changeWorkspace(for agent: Agent, to path: String) async {
         agent.workspacePath = path
         await restartThread(for: agent)
@@ -377,7 +389,7 @@ final class AppSession: ObservableObject {
     func updateDeveloperInstructions(for agent: Agent, to text: String) async {
         let next = Agent.seededInstructions(for: agent.role, override: text)
         let previous = agent.resolvedDeveloperInstructions
-        agent.customInstructions = next
+        agent.customInstructions = next.isEmpty ? nil : next
         guard next != previous, agent.threadId != nil else { return }
         await restartThread(for: agent)
     }
@@ -406,6 +418,9 @@ final class AppSession: ObservableObject {
         let threadId = agent.threadId
 
         await interruptTurn(for: agent)
+        // If turn/start is still in flight, interruptCodexTurn only flags pendingInterrupt.
+        // Wait for send() to observe that and call turn/interrupt before we tear down.
+        await waitForTurnStartToObserveInterrupt(agentID: id)
 
         if let threadId {
             try? await client?.threadArchive(threadId: threadId)

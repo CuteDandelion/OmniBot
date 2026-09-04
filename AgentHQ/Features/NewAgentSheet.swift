@@ -58,7 +58,11 @@ struct NewAgentSheet: View {
 
                     fieldLabel("System message")
                     styledField {
-                        TextField("Role instructions for Codex…", text: $systemMessage, axis: .vertical)
+                        TextField(
+                            role == .custom ? RolePreset.custom.developerInstructions : "Role instructions for Codex…",
+                            text: $systemMessage,
+                            axis: .vertical
+                        )
                             .textFieldStyle(.plain)
                             .font(Tokens.body)
                             .foregroundStyle(Tokens.fg)
@@ -113,8 +117,8 @@ struct NewAgentSheet: View {
                 mascot = newValue.defaultMascot
             }
             let trimmed = systemMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.isEmpty || trimmed == oldValue.developerInstructions {
-                systemMessage = newValue.developerInstructions
+            if trimmed.isEmpty || trimmed == Agent.seededInstructions(for: oldValue) {
+                systemMessage = Agent.seededInstructions(for: newValue)
             }
         }
         .alert("Couldn’t create agent", isPresented: Binding(
@@ -155,7 +159,7 @@ struct NewAgentSheet: View {
             name: trimmedName,
             role: role,
             customRoleTitle: role == .custom && !trimmedTitle.isEmpty ? trimmedTitle : nil,
-            customInstructions: instructions,
+            customInstructions: instructions.isEmpty ? nil : instructions,
             mascot: mascot,
             workspacePath: workspacePath,
             model: model,

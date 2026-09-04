@@ -1,7 +1,11 @@
+import SwiftData
 import SwiftUI
 
 struct SidebarView: View {
+    @Binding var selectedAgentID: UUID?
+    @Query(sort: \Agent.createdAt, order: .forward) private var agents: [Agent]
     @State private var filterText = ""
+    @State private var showingNewAgent = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,8 +39,11 @@ struct SidebarView: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 8)
 
-            List {
-                EmptyView()
+            List(selection: $selectedAgentID) {
+                ForEach(filteredAgents, id: \.id) { agent in
+                    AgentRow(agent: agent)
+                        .tag(agent.id)
+                }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -44,7 +51,7 @@ struct SidebarView: View {
             Divider()
                 .overlay(Tokens.border)
 
-            Button(action: newAgent) {
+            Button(action: { showingNewAgent = true }) {
                 Label("New agent", systemImage: "plus")
                     .font(Tokens.body)
                     .foregroundStyle(Tokens.fg)
@@ -55,18 +62,31 @@ struct SidebarView: View {
             }
             .buttonStyle(.plain)
             .help("New agent")
+            .accessibilityIdentifier("new-agent-button")
         }
         .background(Tokens.subtle)
         .navigationTitle("Agent HQ")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(action: newAgent) {
+                Button(action: { showingNewAgent = true }) {
                     Image(systemName: "plus")
                 }
                 .help("New agent")
             }
         }
+        .sheet(isPresented: $showingNewAgent) {
+            NewAgentSheet { id in
+                selectedAgentID = id
+            }
+        }
     }
 
-    private func newAgent() {}
+    private var filteredAgents: [Agent] {
+        let query = filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty { return agents }
+        return agents.filter {
+            $0.name.localizedCaseInsensitiveContains(query)
+                || $0.displayRole.localizedCaseInsensitiveContains(query)
+        }
+    }
 }

@@ -9,6 +9,7 @@ enum DebugSmoke {
     @MainActor
     static func runIfNeeded(modelContext: ModelContext, selectedAgentID: Binding<UUID?>) {
         guard ProcessInfo.processInfo.environment["AGENTHQ_SMOKE"] == "1" else { return }
+        guard !AgentHQApp.isRunningTests else { return }
         guard !didRun else { return }
         didRun = true
 

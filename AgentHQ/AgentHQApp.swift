@@ -13,12 +13,21 @@ struct AgentHQApp: App {
         .defaultSize(width: 960, height: 640)
     }
 
+    static var isRunningTests: Bool {
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    }
+
     static func makeContainer() -> ModelContainer {
         let schema = Schema([Agent.self, HandoffRecord.self])
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AgentHQ", isDirectory: true)
-        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
-        let config = ModelConfiguration(schema: schema, url: support.appendingPathComponent("default.store"))
+        let config: ModelConfiguration
+        if isRunningTests {
+            config = ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)
+        } else {
+            let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("AgentHQ", isDirectory: true)
+            try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+            config = ModelConfiguration(schema: schema, url: support.appendingPathComponent("default.store"))
+        }
         do {
             return try ModelContainer(for: schema, configurations: [config])
         } catch {

@@ -41,6 +41,13 @@ final class AgentModelTests: XCTestCase {
         XCTAssertEqual(agent.displayRole, "Custom")
     }
 
+    func testDisplayPathUsesTildeForHome() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        XCTAssertEqual(Agent.displayPath(home), "~")
+        XCTAssertEqual(Agent.displayPath(home + "/Documents"), "~/Documents")
+        XCTAssertEqual(Agent.displayPath("/tmp/workspace"), "/tmp/workspace")
+    }
+
     func testRoleTitlesAndInstructions() {
         XCTAssertEqual(RolePreset.chiefOfStaff.defaultTitle, "Chief of Staff")
         XCTAssertTrue(RolePreset.chiefOfStaff.developerInstructions.contains("handoff"))

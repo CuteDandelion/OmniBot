@@ -4,7 +4,8 @@ struct MascotPicker: View {
     @Binding var selection: MascotKind
     var onSelect: ((MascotKind) -> Void)? = nil
 
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 8), count: 4)
+    // 48pt mascot + 4pt padding each side; 8pt gutters. Width = 4*56 + 3*8 = 248.
+    private let columns = Array(repeating: GridItem(.fixed(56), spacing: 8), count: 4)
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 8) {

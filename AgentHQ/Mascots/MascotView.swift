@@ -217,6 +217,10 @@ private struct MascotArt: View {
         let p = palette
         return ZStack {
             Ellipse().fill(p.fur).frame(width: 30 * k, height: 38 * k).position(x: 24 * k, y: 26 * k)
+            Ellipse()
+                .stroke(p.outline, lineWidth: max(1, 1.25 * k))
+                .frame(width: 30 * k, height: 38 * k)
+                .position(x: 24 * k, y: 26 * k)
             Ellipse().fill(p.belly).frame(width: 20 * k, height: 26 * k).position(x: 24 * k, y: 30 * k)
             Ellipse().fill(p.belly).frame(width: 22 * k, height: 16 * k).position(x: 24 * k, y: 18 * k)
             eyes(left: CGPoint(x: 18 * k, y: 18 * k), right: CGPoint(x: 30 * k, y: 18 * k), r: 2.8 * k)
@@ -343,6 +347,7 @@ private struct Palette {
     var inner: Color
     var accent: Color
     var beak: Color
+    var outline: Color
 }
 
 private extension MascotKind {
@@ -355,7 +360,8 @@ private extension MascotKind {
                 belly: Color(hex: "#E2C09A"),
                 inner: Color(hex: "#C48A5A"),
                 accent: Color(hex: "#3B2A1A"),
-                beak: Color(hex: "#3B2A1A")
+                beak: Color(hex: "#3B2A1A"),
+                outline: Color(hex: "#A36B3E")
             )
         case .cat:
             return Palette(
@@ -364,7 +370,8 @@ private extension MascotKind {
                 belly: Color(hex: "#FFF3D6"),
                 inner: Color(hex: "#F3D19A"),
                 accent: Color(hex: "#C45A6A"),
-                beak: Color(hex: "#C45A6A")
+                beak: Color(hex: "#C45A6A"),
+                outline: Color(hex: "#E8A54B")
             )
         case .owl:
             return Palette(
@@ -373,7 +380,8 @@ private extension MascotKind {
                 belly: Color(hex: "#E6D3A3"),
                 inner: Color(hex: "#C4A36A"),
                 accent: Color(hex: "#3B2A1A"),
-                beak: Color(hex: "#E0A020")
+                beak: Color(hex: "#E0A020"),
+                outline: Color(hex: "#7A5A32")
             )
         case .fox:
             return Palette(
@@ -382,7 +390,8 @@ private extension MascotKind {
                 belly: Color(hex: "#F7E6D0"),
                 inner: Color(hex: "#F2C7A0"),
                 accent: Color(hex: "#2B2B2B"),
-                beak: Color(hex: "#2B2B2B")
+                beak: Color(hex: "#2B2B2B"),
+                outline: Color(hex: "#E06A1A")
             )
         case .rabbit:
             return Palette(
@@ -391,16 +400,18 @@ private extension MascotKind {
                 belly: Color(hex: "#FFF8F4"),
                 inner: Color(hex: "#F0B8C6"),
                 accent: Color(hex: "#E08AA0"),
-                beak: Color(hex: "#E08AA0")
+                beak: Color(hex: "#E08AA0"),
+                outline: Color(hex: "#F0D6C8")
             )
         case .penguin:
             return Palette(
-                fur: Color(hex: "#2B3137"),
-                furDark: Color(hex: "#161B22"),
+                fur: Color(lightHex: "#2B3137", darkHex: "#8B949E"),
+                furDark: Color(lightHex: "#161B22", darkHex: "#6E7681"),
                 belly: Color(hex: "#F6F8FA"),
                 inner: Color(hex: "#E6EDF3"),
                 accent: Color(hex: "#1f2328"),
-                beak: Color(hex: "#E09B3D")
+                beak: Color(hex: "#E09B3D"),
+                outline: Color(lightHex: "#656D76", darkHex: "#C9D1D9")
             )
         case .frog:
             return Palette(
@@ -409,7 +420,8 @@ private extension MascotKind {
                 belly: Color(hex: "#D7F0A3"),
                 inner: Color(hex: "#A5D96A"),
                 accent: Color(hex: "#1f4d20"),
-                beak: Color(hex: "#1f4d20")
+                beak: Color(hex: "#1f4d20"),
+                outline: Color(hex: "#4FA64A")
             )
         case .corgi:
             return Palette(
@@ -418,7 +430,8 @@ private extension MascotKind {
                 belly: Color(hex: "#FFF8EE"),
                 inner: Color(hex: "#F3E2C4"),
                 accent: Color(hex: "#3B2A1A"),
-                beak: Color(hex: "#3B2A1A")
+                beak: Color(hex: "#3B2A1A"),
+                outline: Color(hex: "#E0A04A")
             )
         }
     }

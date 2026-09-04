@@ -20,12 +20,16 @@ final class Agent {
     }
 
     var displayWorkspacePath: String {
+        Self.displayPath(workspacePath)
+    }
+
+    static func displayPath(_ path: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if workspacePath == home { return "~" }
-        if workspacePath.hasPrefix(home + "/") {
-            return "~" + workspacePath.dropFirst(home.count)
+        if path == home { return "~" }
+        if path.hasPrefix(home + "/") {
+            return "~" + path.dropFirst(home.count)
         }
-        return workspacePath
+        return path
     }
 
     init(

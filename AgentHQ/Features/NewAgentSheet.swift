@@ -1,4 +1,3 @@
-import AppKit
 import SwiftData
 import SwiftUI
 
@@ -14,79 +13,82 @@ struct NewAgentSheet: View {
     @State private var mascot: MascotKind = RolePreset.chiefOfStaff.defaultMascot
     @State private var userPickedMascot = false
     @State private var workspacePath = ""
+    @State private var saveError: String?
 
     private var canSave: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !workspacePath.isEmpty
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("New agent")
-                .font(Tokens.body.weight(.semibold))
-                .foregroundStyle(Tokens.fg)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("New agent")
+                        .font(Tokens.body.weight(.semibold))
+                        .foregroundStyle(Tokens.fg)
 
-            fieldLabel("Name")
-            styledField {
-                TextField("Ada", text: $name)
-                    .textFieldStyle(.plain)
+                    fieldLabel("Name")
+                    styledField {
+                        TextField("Ada", text: $name)
+                            .textFieldStyle(.plain)
+                            .font(Tokens.body)
+                            .foregroundStyle(Tokens.fg)
+                            .accessibilityIdentifier("agent-name-field")
+                    }
+
+                    fieldLabel("Role")
+                    Picker("Role", selection: $role) {
+                        ForEach(RolePreset.allCases) { preset in
+                            Text(preset.defaultTitle).tag(preset)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
                     .font(Tokens.body)
-                    .foregroundStyle(Tokens.fg)
-                    .accessibilityIdentifier("agent-name-field")
-            }
+                    .accessibilityIdentifier("agent-role-picker")
 
-            fieldLabel("Role")
-            Picker("Role", selection: $role) {
-                ForEach(RolePreset.allCases) { preset in
-                    Text(preset.defaultTitle).tag(preset)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .font(Tokens.body)
-            .accessibilityIdentifier("agent-role-picker")
+                    if role == .custom {
+                        styledField {
+                            TextField("Title (optional)", text: $customRoleTitle)
+                                .textFieldStyle(.plain)
+                                .font(Tokens.body)
+                                .foregroundStyle(Tokens.fg)
+                        }
+                        styledField {
+                            TextField("What should this agent do?", text: $customInstructions, axis: .vertical)
+                                .textFieldStyle(.plain)
+                                .font(Tokens.body)
+                                .foregroundStyle(Tokens.fg)
+                                .lineLimit(3...6)
+                        }
+                    }
 
-            if role == .custom {
-                styledField {
-                    TextField("Title (optional)", text: $customRoleTitle)
-                        .textFieldStyle(.plain)
+                    fieldLabel("Mascot")
+                    MascotPicker(selection: $mascot) { _ in
+                        userPickedMascot = true
+                    }
+
+                    fieldLabel("Workspace")
+                    HStack(spacing: 8) {
+                        Button("Choose folder…") {
+                            if let path = WorkspaceFolder.choose(currentPath: workspacePath) {
+                                workspacePath = path
+                            }
+                        }
                         .font(Tokens.body)
-                        .foregroundStyle(Tokens.fg)
-                }
-                styledField {
-                    TextField("What should this agent do?", text: $customInstructions, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(Tokens.body)
-                        .foregroundStyle(Tokens.fg)
-                        .lineLimit(3...6)
-                }
-            }
+                        .accessibilityIdentifier("choose-folder-button")
 
-            fieldLabel("Mascot")
-            MascotPicker(selection: $mascot) { _ in
-                userPickedMascot = true
-            }
-
-            fieldLabel("Workspace")
-            HStack(spacing: 8) {
-                Button("Choose folder…") {
-                    if let path = WorkspaceFolder.choose(currentPath: workspacePath) {
-                        workspacePath = path
+                        if !workspacePath.isEmpty {
+                            Text(Agent.displayPath(workspacePath))
+                                .font(Tokens.caption)
+                                .foregroundStyle(Tokens.muted)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .help(workspacePath)
+                        }
                     }
                 }
-                .font(Tokens.body)
-                .accessibilityIdentifier("choose-folder-button")
-
-                if !workspacePath.isEmpty {
-                    Text(Agent.displayPath(workspacePath))
-                        .font(Tokens.caption)
-                        .foregroundStyle(Tokens.muted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(workspacePath)
-                }
             }
-
-            Spacer(minLength: 8)
 
             HStack {
                 Spacer()
@@ -97,14 +99,24 @@ struct NewAgentSheet: View {
                     .disabled(!canSave)
                     .accessibilityIdentifier("create-agent-button")
             }
+            .padding(.top, 12)
         }
         .padding(20)
-        .frame(width: 420, height: role == .custom ? 560 : 470)
+        .frame(width: 420)
+        .frame(minHeight: 480, maxHeight: 640)
         .background(Tokens.subtle)
         .onChange(of: role) { _, newValue in
             if !userPickedMascot {
                 mascot = newValue.defaultMascot
             }
+        }
+        .alert("Couldn’t create agent", isPresented: Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveError ?? "")
         }
     }
 
@@ -143,7 +155,13 @@ struct NewAgentSheet: View {
             reasoningEffort: effort
         )
         modelContext.insert(agent)
-        try? modelContext.save()
+        do {
+            try modelContext.save()
+        } catch {
+            modelContext.delete(agent)
+            saveError = error.localizedDescription
+            return
+        }
         UserDefaults.standard.set(model, forKey: Self.lastModelKey)
         UserDefaults.standard.set(effort, forKey: Self.lastEffortKey)
         onCreated(agent.id)
@@ -166,30 +184,3 @@ struct NewAgentSheet: View {
     }
 }
 
-enum WorkspaceFolder {
-    static func choose(currentPath: String = "") -> String? {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Choose"
-        panel.message = "Choose a workspace folder"
-        if !currentPath.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: currentPath)
-        }
-        guard panel.runModal() == .OK else { return nil }
-        return panel.url?.path
-    }
-}
-
-private extension Agent {
-    static func displayPath(_ path: String) -> String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        if path == home { return "~" }
-        if path.hasPrefix(home + "/") {
-            return "~" + path.dropFirst(home.count)
-        }
-        return path
-    }
-}

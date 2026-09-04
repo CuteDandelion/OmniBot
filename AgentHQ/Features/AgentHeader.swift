@@ -3,7 +3,9 @@ import SwiftUI
 
 struct AgentHeader: View {
     @Bindable var agent: Agent
+    @Environment(\.modelContext) private var modelContext
     @State private var showingMascotPicker = false
+    @State private var saveError: String?
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -16,10 +18,12 @@ struct AgentHeader: View {
             .help("Change mascot")
             .accessibilityIdentifier("header-mascot")
             .popover(isPresented: $showingMascotPicker, arrowEdge: .bottom) {
-                MascotPicker(selection: $agent.mascot)
-                    .padding(12)
-                    .frame(width: 264)
-                    .background(Tokens.subtle)
+                MascotPicker(selection: $agent.mascot) { _ in
+                    persist()
+                }
+                .padding(12)
+                .fixedSize()
+                .background(Tokens.subtle)
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -39,6 +43,7 @@ struct AgentHeader: View {
                 Button {
                     if let path = WorkspaceFolder.choose(currentPath: agent.workspacePath) {
                         agent.workspacePath = path
+                        persist()
                     }
                 } label: {
                     Text(agent.displayWorkspacePath)
@@ -58,5 +63,21 @@ struct AgentHeader: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(Tokens.canvas)
+        .alert("Couldn’t save", isPresented: Binding(
+            get: { saveError != nil },
+            set: { if !$0 { saveError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(saveError ?? "")
+        }
+    }
+
+    private func persist() {
+        do {
+            try modelContext.save()
+        } catch {
+            saveError = error.localizedDescription
+        }
     }
 }

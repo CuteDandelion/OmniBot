@@ -175,6 +175,74 @@ final class AppSessionChatTests: XCTestCase {
         XCTAssertEqual(starts.count, 2)
         XCTAssertEqual(starts.last?["cwd"] as? String, next.path)
     }
+
+    func testApprovalQueueAllowAlwaysAndDeny() async throws {
+        XCTAssertEqual(ApprovalDecision.accept.rawValue, "accept")
+        XCTAssertEqual(ApprovalDecision.acceptForSession.rawValue, "acceptForSession")
+        XCTAssertEqual(ApprovalDecision.decline.rawValue, "decline")
+
+        let env = try ChatFakeEnv(approvalCount: 3)
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+        await env.session.send("run a command outside the workspace", from: env.agent)
+
+        let first = await waitUntil(timeout: 2) {
+            env.session.pendingApproval?.command == "ls /etc"
+        }
+        XCTAssertTrue(first, "expected first approval: \(String(describing: env.session.pendingApproval))")
+        XCTAssertEqual(env.session.pendingApproval?.reason, "Command is outside the workspace")
+        XCTAssertEqual(env.session.pendingApproval?.agentID, env.agent.id)
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .needsApproval)
+
+        await env.session.respondToPendingApproval(.accept)
+        let second = await waitUntil(timeout: 2) {
+            env.session.pendingApproval?.command == "curl https://example.com"
+        }
+        XCTAssertTrue(second, "expected queued approval after Allow: \(String(describing: env.session.pendingApproval))")
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .needsApproval)
+
+        await env.session.respondToPendingApproval(.acceptForSession)
+        let third = await waitUntil(timeout: 2) {
+            env.session.pendingApproval?.command == "rm -rf /tmp/agenthq-outside"
+        }
+        XCTAssertTrue(third, "expected third approval after Allow always: \(String(describing: env.session.pendingApproval))")
+
+        await env.session.respondToPendingApproval(.decline)
+        let cleared = await waitUntil(timeout: 2) { env.session.pendingApproval == nil }
+        XCTAssertTrue(cleared)
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .working)
+
+        let logged = await waitUntil(timeout: 2) { env.loggedDecisions().count == 3 }
+        XCTAssertTrue(logged, "missing approval RPC responses: \(env.loggedDecisions())")
+        XCTAssertEqual(env.loggedDecisions().map(\.id), ["approval-1", "approval-2", "approval-3"])
+        XCTAssertEqual(env.loggedDecisions().map(\.decision), ["accept", "acceptForSession", "decline"])
+    }
+
+    func testApprovalFromUnselectedAgentStillPresents() async throws {
+        let env = try ChatFakeEnv(approvalCount: 1)
+        defer { env.session.shutdown() }
+        await env.session.retry()
+        await env.session.ensureThread(for: env.agent)
+
+        let other = Agent(
+            name: "Ada",
+            role: .chiefOfStaff,
+            mascot: .bear,
+            workspacePath: env.workspace.path
+        )
+        await env.session.ensureThread(for: other)
+        XCTAssertEqual(other.threadId, "thread-2")
+
+        await env.session.send("ls /etc", from: env.agent)
+        let shown = await waitUntil(timeout: 2) {
+            env.session.pendingApproval?.agentID == env.agent.id
+        }
+        XCTAssertTrue(shown, "background agent approval missing: \(String(describing: env.session.pendingApproval))")
+        XCTAssertEqual(env.session.pendingApproval?.command, "ls /etc")
+        XCTAssertEqual(env.session.mascotState(for: env.agent.id), .needsApproval)
+        XCTAssertEqual(env.session.mascotState(for: other.id), .idle)
+    }
 }
 
 private final class Collector: @unchecked Sendable {
@@ -202,7 +270,7 @@ private struct ChatFakeEnv {
     let logURL: URL
     private let context: ModelContext
 
-    init(threadId: String? = nil, turnDelayMS: Int = 0) throws {
+    init(threadId: String? = nil, turnDelayMS: Int = 0, approvalCount: Int = 0) throws {
         let workspace = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-ws-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         let logURL = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-fake-\(UUID().uuidString).jsonl")
@@ -235,6 +303,9 @@ private struct ChatFakeEnv {
                 if turnDelayMS > 0 {
                     extra["AGENTHQ_FAKE_TURN_DELAY_MS"] = String(turnDelayMS)
                 }
+                if approvalCount > 0 {
+                    extra["AGENTHQ_FAKE_APPROVALS"] = String(approvalCount)
+                }
                 return AppServerClient(executableURL: url, extraConfig: extra)
             }
         )
@@ -257,6 +328,26 @@ private struct ChatFakeEnv {
         }
     }
 
+    func loggedDecisions() -> [(id: String, decision: String)] {
+        guard let data = try? Data(contentsOf: logURL),
+              let text = String(data: data, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+                  obj["method"] == nil,
+                  let result = obj["result"] as? [String: Any],
+                  let decision = result["decision"] as? String else { return nil }
+            let id: String
+            if let value = obj["id"] as? String {
+                id = value
+            } else if let value = obj["id"] as? Int {
+                id = String(value)
+            } else {
+                return nil
+            }
+            return (id, decision)
+        }
+    }
+
     private static func writeFakeServer() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("agenthq-chat-fake-\(UUID().uuidString).py")
         try script.write(to: url, atomically: true, encoding: .utf8)
@@ -271,6 +362,7 @@ import json, sys, time
 
 LOG = None
 DELAY_MS = 0
+APPROVALS = 0
 for index, arg in enumerate(sys.argv):
     if arg != "-c" or index + 1 >= len(sys.argv):
         continue
@@ -279,7 +371,14 @@ for index, arg in enumerate(sys.argv):
         LOG = value.split("=", 1)[1]
     elif value.startswith("AGENTHQ_FAKE_TURN_DELAY_MS="):
         DELAY_MS = int(value.split("=", 1)[1])
+    elif value.startswith("AGENTHQ_FAKE_APPROVALS="):
+        APPROVALS = int(value.split("=", 1)[1])
 STARTS = 0
+APPROVAL_COMMANDS = [
+    "ls /etc",
+    "curl https://example.com",
+    "rm -rf /tmp/agenthq-outside",
+]
 
 MODEL = {
     "id": "gpt-5.6",
@@ -317,7 +416,9 @@ def handle(msg):
     method = msg.get("method")
     mid = msg.get("id")
     params = msg.get("params") or {}
-    log({"method": method, "params": params})
+    log(msg)
+    if method is None:
+        return
 
     if method == "initialize":
         send({"id": mid, "result": {"userAgent": "codex-fake", "codexHome": "/tmp", "platformFamily": "unix", "platformOs": "macos"}})
@@ -368,6 +469,22 @@ def handle(msg):
             "threadId": tid,
             "turnId": "turn-1",
         }})
+        if APPROVALS:
+            for i in range(APPROVALS):
+                cmd = APPROVAL_COMMANDS[i % len(APPROVAL_COMMANDS)]
+                send({
+                    "id": "approval-%d" % (i + 1),
+                    "method": "item/commandExecution/requestApproval",
+                    "params": {
+                        "itemId": "item-cmd-%d" % (i + 1),
+                        "startedAtMs": 0,
+                        "threadId": tid,
+                        "turnId": "turn-1",
+                        "command": cmd,
+                        "cwd": "/tmp",
+                        "reason": "Command is outside the workspace",
+                    },
+                })
         return
     if method == "turn/interrupt":
         turn_id = params.get("turnId")

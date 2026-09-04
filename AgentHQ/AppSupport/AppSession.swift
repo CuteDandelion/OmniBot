@@ -102,6 +102,7 @@ final class AppSession: ObservableObject {
     @Published private(set) var activeTurnAgentIDs: Set<UUID> = []
     @Published private(set) var workspaceWarning: String?
     @Published private(set) var pendingApproval: PendingApproval?
+    @Published private var approvalQueue: [PendingApproval] = []
 
     static let clientInfo = ClientInfo(name: "agent_hq", title: "Agent HQ", version: "0.1.0")
 
@@ -146,6 +147,7 @@ final class AppSession: ObservableObject {
 
     func mascotState(for agentID: UUID) -> MascotState {
         if pendingApproval?.agentID == agentID { return .needsApproval }
+        if approvalQueue.contains(where: { $0.agentID == agentID }) { return .needsApproval }
         if activeTurnAgentIDs.contains(agentID) { return .working }
         return .idle
     }
@@ -293,7 +295,7 @@ final class AppSession: ObservableObject {
 
     func respondToPendingApproval(_ decision: ApprovalDecision) async {
         guard let pending = pendingApproval else { return }
-        pendingApproval = nil
+        pendingApproval = approvalQueue.isEmpty ? nil : approvalQueue.removeFirst()
         do {
             try await client?.respondApproval(requestId: pending.requestId, decision: decision)
         } catch {
@@ -370,6 +372,7 @@ final class AppSession: ObservableObject {
         pendingInterruptAgentIDs = []
         interruptedAgentIDs = []
         pendingApproval = nil
+        approvalQueue = []
         clearWorkingRows()
     }
 
@@ -461,24 +464,28 @@ final class AppSession: ObservableObject {
 
         switch event {
         case .commandExecutionApproval(let requestId, let params):
-            pendingApproval = PendingApproval(
-                requestId: requestId,
-                threadId: params.threadId,
-                agentID: agentIDByThread[params.threadId],
-                command: params.command ?? "command",
-                reason: params.reason
+            enqueueApproval(
+                PendingApproval(
+                    requestId: requestId,
+                    threadId: params.threadId,
+                    agentID: agentIDByThread[params.threadId],
+                    command: params.command ?? "command",
+                    reason: params.reason
+                )
             )
         case .request(let requestId, let method, let params):
             if method.contains("requestApproval") || method.contains("requestUserInput") {
                 let threadId = params?.object?["threadId"]?.string ?? ""
-                pendingApproval = PendingApproval(
-                    requestId: requestId,
-                    threadId: threadId,
-                    agentID: agentIDByThread[threadId],
-                    command: params?.object?["command"]?.string
-                        ?? params?.object?["reason"]?.string
-                        ?? method,
-                    reason: params?.object?["reason"]?.string
+                enqueueApproval(
+                    PendingApproval(
+                        requestId: requestId,
+                        threadId: threadId,
+                        agentID: agentIDByThread[threadId],
+                        command: params?.object?["command"]?.string
+                            ?? params?.object?["reason"]?.string
+                            ?? method,
+                        reason: params?.object?["reason"]?.string
+                    )
                 )
             }
         default:
@@ -495,9 +502,24 @@ final class AppSession: ObservableObject {
         if finished {
             finishTurn(agentID)
             interruptedAgentIDs.remove(agentID)
-            if pendingApproval?.threadId == threadId {
-                pendingApproval = nil
-            }
+            dropApprovals(for: threadId)
+        }
+    }
+
+    private func enqueueApproval(_ approval: PendingApproval) {
+        if pendingApproval?.requestId == approval.requestId { return }
+        if approvalQueue.contains(where: { $0.requestId == approval.requestId }) { return }
+        if pendingApproval == nil {
+            pendingApproval = approval
+        } else {
+            approvalQueue.append(approval)
+        }
+    }
+
+    private func dropApprovals(for threadId: String) {
+        approvalQueue.removeAll { $0.threadId == threadId }
+        if pendingApproval?.threadId == threadId {
+            pendingApproval = approvalQueue.isEmpty ? nil : approvalQueue.removeFirst()
         }
     }
 

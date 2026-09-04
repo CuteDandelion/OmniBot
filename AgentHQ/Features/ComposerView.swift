@@ -17,6 +17,14 @@ struct ComposerView: View {
                 .foregroundStyle(Tokens.fg)
                 .lineLimit(3...8)
                 .accessibilityIdentifier("composer-input")
+                .onKeyPress(keys: [.return]) { press in
+                    if press.modifiers.contains(.shift) {
+                        return .ignored
+                    }
+                    if isRunning { return .handled }
+                    send()
+                    return .handled
+                }
 
             HStack(spacing: 8) {
                 Picker("Model", selection: modelBinding) {
@@ -42,10 +50,16 @@ struct ComposerView: View {
 
                 Spacer(minLength: 0)
 
-                Button("Send") { send() }
-                    .font(Tokens.body)
-                    .disabled(!canSend)
-                    .accessibilityIdentifier("composer-send")
+                Button(isRunning ? "Stop" : "Send") {
+                    if isRunning {
+                        Task { await session.interruptTurn(for: agent) }
+                    } else {
+                        send()
+                    }
+                }
+                .font(Tokens.body)
+                .disabled(isRunning ? false : !canSend)
+                .accessibilityIdentifier(isRunning ? "composer-stop" : "composer-send")
             }
         }
         .padding(.horizontal, 12)
@@ -63,8 +77,14 @@ struct ComposerView: View {
         }
     }
 
+    private var isRunning: Bool {
+        session.isTurnActive(for: agent.id)
+    }
+
     private var canSend: Bool {
-        agent.threadId != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        session.connectionState == .ready
+            && agent.threadId != nil
+            && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var modelOptions: [ModelInfo] {
@@ -130,6 +150,9 @@ struct ComposerView: View {
     }
 
     private func send() {
-        guard agent.threadId != nil else { return }
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard agent.threadId != nil, !text.isEmpty, !isRunning else { return }
+        draft = ""
+        Task { await session.send(text, from: agent) }
     }
 }

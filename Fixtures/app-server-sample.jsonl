@@ -1,0 +1,9 @@
+{"id":1,"method":"initialize","params":{"clientInfo":{"name":"agent_hq","title":"Agent HQ","version":"0.1.0"}}}
+{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-fake"}}
+{"method":"initialized"}
+{"id":2,"method":"thread/start","params":{"approvalPolicy":"on-request","cwd":"/tmp","model":"gpt-5.6","sandbox":"workspace-write"}}
+{"id":2,"result":{"approvalPolicy":"on-request","approvalsReviewer":"user","cwd":"/tmp","model":"gpt-5.6","modelProvider":"openai","sandbox":{"type":"workspaceWrite"},"thread":{"id":"thread-1","cliVersion":"0.153.2","createdAt":0,"cwd":"/tmp","ephemeral":false,"modelProvider":"openai","preview":"","projectId":null,"sessionId":"session-1","source":"appServer","status":{"type":"idle"},"turns":[],"updatedAt":0}}}
+{"method":"item/agentMessage/delta","params":{"delta":"Hello","itemId":"item-msg","threadId":"thread-1","turnId":"turn-1"}}
+{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","items":[],"status":"completed"}}}
+{"id":"approval-1","method":"item/commandExecution/requestApproval","params":{"command":"ls -la","cwd":"/tmp","itemId":"item-1","startedAtMs":0,"threadId":"thread-1","turnId":"turn-1"}}
+{"id":"approval-1","result":{"decision":"accept"}}
